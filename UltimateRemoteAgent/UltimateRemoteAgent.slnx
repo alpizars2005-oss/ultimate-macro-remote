@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="src/UltimateRemoteAgent/UltimateRemoteAgent.csproj" />
+  <Project Path="tests/UltimateRemoteAgent.Tests/UltimateRemoteAgent.Tests.csproj" />
+</Solution>

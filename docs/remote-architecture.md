@@ -14,7 +14,7 @@ INI slot and its state/result file is under the interactive user's `%APPDATA%`. 
 milestone does not edit `Main.ahk`, `Main_Remote.ahk`, `submacros/watchdog.ahk`, or any
 gameplay loop.
 
-## Architecture after R2
+## Architecture after R3
 
 ```text
 Discord bot (central only)
@@ -25,7 +25,10 @@ RemoteService ---- SQLite device/owner/command state
         |
         | authenticated WSS /remote/v1/agent
         v
-simulated Agent (R1/R2 tests)
+UltimateRemoteAgent (R3)
+        |
+        +-- exact process/state inspection (read-only)
+        +-- approved Resources\Strats catalog (read-only)
 
 /macro pair -> PairingService -> hashed, expiring ticket in SQLite
                                       |
@@ -33,8 +36,8 @@ simulated Agent (R1/R2 tests)
                                       v
                          one-time R1 device credential
 
-UltimateRemoteAgent -> local AHK bridge -> Ultimate Macro -> Roblox
-       (future)          (existing safe gate)
+UltimateRemoteAgent -> local mutation bridge -> Ultimate Macro -> Roblox
+     (R3 transport)         (future R4)          (existing safe gate)
 ```
 
 R1 supplies the strict protocol, authenticated outbound-Agent endpoint, connection and
@@ -49,6 +52,22 @@ no user or device selector. `/macro pair` binds a 256-bit ticket to that same id
 only the ticket digest is stored. Redemption is rate-limited and atomically consumes
 the ticket while creating the existing R1 device bearer. `RemoteStore.provision_device`
 remains an internal test primitive and is not exposed by HTTP or Discord.
+
+R3 adds the real Windows transport and a read-only local bridge. The self-contained
+`win-x64` Agent stores its entire enrollment envelope under the interactive user's
+LocalAppData using DPAPI CurrentUser, opens only an outbound authenticated WSS
+connection with normal Windows certificate validation, advertises only GET_STATUS and
+LIST_STRATEGIES, sends low-frequency protocol heartbeats, and reconnects with capped
+exponential full jitter. It parses reconciliation IDs as metadata and never treats them
+as commands.
+
+Status requires a successful WMI census of the fixed bundled AutoHotkey executable and
+exact `Main_Remote.ahk` argument, then rechecks PID/creation identity after reading the
+bounded UTF-16 state file. Stale `Running=1` cannot prove a live macro. Strategy listing
+is top-level `.strat` only under the fixed approved root, with handle-resolved local
+containment, reparse/network/traversal/duplicate rejection, and path-free opaque IDs.
+The Agent contains no launcher, mailbox writer, command journal, OCR, image scanner,
+startup persistence, or local START/STOP/SWITCH implementation.
 
 For local backend development after installing `requirements.txt`, run
 `python -m central.server`. It binds `127.0.0.1:8765`, stores state under
@@ -77,16 +96,6 @@ in `Authorization: Pairing …`; it accepts no body/query identity data and retu
 device bearer once with no-store headers. See `remote-pairing-v1.md`.
 
 ## Smallest remaining vertical-slice milestones
-
-### R3 — self-contained Windows Agent transport and read-only bridge
-
-Create `UltimateRemoteAgent/UltimateRemoteAgent.csproj` and source folders for
-transport, credential storage, strategy catalog, process/state inspection, and tests.
-Target `net10.0-windows` and publish `win-x64` self-contained/single-file so PC B needs
-no .NET runtime, Python, editor, or bot token. Use DPAPI CurrentUser or Windows
-Credential Manager for the device bearer, one instance per interactive user, normal
-certificate validation, outbound WSS, full-jitter reconnect backoff, low-frequency
-heartbeat, and no OCR/pixel or busy polling. Prove GET_STATUS and LIST_STRATEGIES first.
 
 ### R4 — fixed local START/STOP/SWITCH adapter
 
@@ -126,9 +135,10 @@ satisfied.
 - R1 adds direct `aiohttp>=3.13,<4` use. SQLite, JSON, hashing, secrets, TLS, and tests use
   the Python standard library.
 - R2 reuses `discord.py` and `python-dotenv`, already declared.
-- R3/R4 use the installed .NET 10 SDK and Windows framework APIs. The release is
-  self-contained; no runtime is installed on PC B. Avoid a WMI package until exact
-  process identity requirements justify it.
+- R3 targets `net10.0-windows`. Microsoft `System.Management` supplies the bounded WMI
+  command-line census needed to distinguish the exact AHK script, and
+  `System.Security.Cryptography.ProtectedData` supplies DPAPI CurrentUser. The
+  `win-x64` single-file release is self-contained; no runtime is installed on PC B.
 
 ## TLS, hosting, and OAuth infrastructure gate
 
@@ -155,7 +165,7 @@ infer identity from guild membership, usernames, or a manually typed Discord ID.
 - PC A, its OS account, SQLite file, environment, and TLS terminator are trusted.
 - A random device bearer authenticates one installation; server compromise can issue
   only protocol-allowlisted operations, not arbitrary execution.
-- Future DPAPI/Credential Manager storage protects against another Windows account or
+- DPAPI CurrentUser storage protects against another Windows account or
   offline copying, not malware already running as the same user or a local administrator.
 - The current AHK mailbox is unauthenticated local same-user IPC. The Agent must validate
   every network command and path before writing it.

@@ -108,6 +108,13 @@ Agent to server:
 }
 ```
 
+The full list in the generic example above is the eventual protocol-1 capability set.
+The R3 Agent advertises only `GET_STATUS` and `LIST_STRATEGIES`; central therefore
+refuses to dispatch the three mutating operations to it. R3 still parses their closed
+wire shapes so it can return a fixed `OPERATION_UNSUPPORTED` failure if a
+nonconforming server sends one, but it never accepts, journals, or executes them
+locally.
+
 Server to Agent:
 
 ```json
@@ -121,10 +128,11 @@ Server to Agent:
 ```
 
 `reconcile_commands` contains IDs and operation names only. It is not a replay request
-and contains no arguments. On reconnect, the Agent must compare each entry with its
+and contains no arguments. A mutation-capable Agent must compare each entry with its
 durable local command journal, the exact AHK mailbox ID, and the exact AHK result ID,
-then report the known state. It must never execute an operation merely because it
-appears in this list.
+then report the known state. The read-only R3 Agent has no mutation journal: it records
+only that reconciliation metadata was received and sends no update for it. An Agent
+must never execute an operation merely because it appears in this list.
 
 ## Heartbeat and snapshot
 
@@ -183,8 +191,11 @@ queued -> accepted -> executing -> completed
 ```
 
 - `queued`: persisted centrally and sent, but not acknowledged by the Agent.
-- `accepted`: the Agent validated the operation and durably journaled its command ID.
-- `executing`: the fixed local action has begun or is waiting at the AHK safe boundary.
+- `accepted`: the Agent validated the operation. R3 holds read-only command state only
+  in memory; before acknowledging a mutating operation, a future Agent must durably
+  journal its command ID.
+- `executing`: read-only sampling has begun, or a fixed local mutation has begun or is
+  waiting at the AHK safe boundary.
 - `completed`: the operation-specific postcondition below is true.
 - `failed`: normally the Agent has a definite sanitized failure result. Administrative
   device revocation also terminalizes unresolved work with

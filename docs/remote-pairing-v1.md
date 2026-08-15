@@ -80,6 +80,7 @@ The pairing endpoint is safe for cross-PC use only through direct trusted TLS or
 trusted loopback reverse proxy/tunnel. A proxy must preserve `Authorization`, POST, and
 WebSocket Upgrade traffic, and must redact authorization headers and pairing response
 bodies from logs. The ticket necessarily traverses Discord and is shown ephemerally to
-the invoking user before its one-time handoff to a future Agent. Bot tokens and backend
+the invoking user before its one-time handoff to the R3 Agent. Bot tokens and backend
 secrets remain central-server-only; the device bearer is returned only to the redeeming
-Agent. R2 does not implement that Windows Agent or claim a two-PC deployment.
+Agent. The Agent requires a normally trusted HTTPS/WSS origin and offers no
+certificate-bypass or plaintext enrollment mode.
