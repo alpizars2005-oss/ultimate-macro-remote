@@ -1,54 +1,80 @@
-# Ultimate Macro Remote — V2 for 1.3.2a
+# Ultimate Macro Remote — R2 development setup
 
-This patch is rebased on the actual packaged Ultimate Macro **1.3.2a** `Main.ahk`.
+This branch keeps the packaged Ultimate Macro **1.3.2a** gameplay implementation and
+adds a central Remote backend. Keep `Main.ahk` as the stock fallback. R2 does not edit
+`Main.ahk`, `Main_Remote.ahk`, the watchdog, or any timing-sensitive gameplay code.
 
-## Important
+## What R2 contains
 
-Use these files with the extracted **TDS_Macro (1).zip** release folder.
-
-Do **not** replace your original `Main.ahk`.
-Keep it as a clean fallback and add `Main_Remote.ahk` beside it.
-
-## Included commands
+The central Discord bot exposes five protocol-1 controls:
 
 - `/macro status`
-- `/macro start <strategy>`
-- `/macro switch <strategy>`
-- `/macro stop`
-- `/macro cancel`
 - `/macro strategies`
+- `/macro start <strategy>`
+- `/macro stop`
+- `/macro switch <strategy>`
 
-`switch` and `stop` are consumed only at the safe between-match boundary, before the macro
-runs Restart / Play Again / rejoin logic. They are not consumed in the middle of `PlayStrategy()`.
+`/macro pair` is a separate, temporary development-enrollment command. It creates a
+256-bit, short-lived, single-use ticket bound to the invoking Discord account. There is
+no `/macro cancel`, arbitrary command execution, filename/path input, manually entered
+Discord user ID, or device-ID selection.
 
-## Install
+R2 does **not** contain the Windows Agent. The control commands are exercised with the
+simulated Agent integration tests for now; they do not yet control a second PC. Do not
+copy `.env`, the Discord bot token, or central backend state to a client PC.
 
-1. Extract your normal Ultimate Macro 1.3.2a release.
-2. Copy every file from this V2 ZIP into that folder.
-3. Run `setup_bot.bat`.
-4. Edit `.env`:
-   - `DISCORD_TOKEN`
-   - `ALLOWED_USER_ID`
-   - `GUILD_ID`
-5. Run `run_bot.bat`.
-6. Test `/macro status`.
-7. Test `/macro strategies`.
-8. For the first live test, use a short/safe strategy and then try `/macro switch`.
-9. Keep `Main.ahk` untouched so you can immediately fall back to the stock macro.
+## Central development setup (PC A)
 
-## Discord bot setup
+1. Run `setup_bot.bat` to create `.venv` and install `requirements.txt`.
+2. Edit the untracked `.env` on PC A:
+   - set `DISCORD_TOKEN`;
+   - optionally set `DISCORD_GUILD_ID` for immediate development-guild command sync;
+   - set `ULTIMATE_REMOTE_PUBLIC_HTTPS_ORIGIN` only when a trusted HTTPS/WSS origin is
+     available.
+3. Create/invite a private Discord bot with the `bot` and `applications.commands`
+   scopes.
+4. Run `run_bot.bat`. This starts the aiohttp backend and Discord client in one process,
+   sharing one SQLite store and `RemoteService`.
+5. Run the test suite with
+   `.venv\Scripts\python.exe -B -m unittest discover -s tests -v`.
 
-Create a private Discord application/bot in the Discord Developer Portal.
-Invite it to your private test server with the `bot` and `applications.commands` scopes.
+The backend defaults to literal loopback. For traffic from another PC, terminate TLS
+with a trusted certificate, preserve both the `Authorization` and WebSocket Upgrade
+headers, and redact authorization headers and pairing response bodies from proxy logs.
+Do not expose raw loopback HTTP directly to a network.
 
-The bot is additionally locked to `ALLOWED_USER_ID`, so commands from other Discord users
-are rejected.
+## Development pairing flow
 
-Never share the bot token or commit `.env` to GitHub.
+1. The user invokes `/macro pair`; `interaction.user.id` is the only identity input.
+2. Discord returns the ticket ephemerally and with all mentions disabled.
+3. A simulator sends an empty-body `POST /remote/v1/pair` with
+   `Authorization: Pairing <ticket>` over trusted HTTPS. Literal loopback HTTP is
+   permitted only for a simulator running on the central PC.
+4. Central atomically consumes the hashed ticket and creates the existing R1 device
+   credential. The credential is returned once and SQLite stores only its hash.
+5. The simulator uses that credential as `Authorization: Bearer …` on the unchanged
+   `/remote/v1/agent` WebSocket.
 
-## Architecture
+Unknown, expired, redeemed, superseded, and owner-conflicting tickets share the same
+public redemption failure. A lost successful HTTP response cannot be replayed; the
+orphan device must be explicitly revoked before pairing again.
 
-Phone -> Discord slash command -> bot.py -> local `remote_command.ini` ->
-Main_Remote.ahk -> safe between-match command gate -> Roblox/TDS
+## Current architecture
 
-No inbound port forwarding is required.
+```text
+Discord interaction.user.id ----> central Discord commands
+             |                              |
+             +---- /macro pair              v
+                       |                RemoteService ---- SQLite
+                       v                     |
+                hashed one-use ticket        | authenticated WSS
+                       |                     v
+                 HTTPS redemption       simulated Agent (R2)
+
+Windows Agent -> local AHK bridge -> Ultimate Macro -> Roblox
+    (future R3/R4; not implemented in R2)
+```
+
+For the exact security and wire contracts, see
+[`docs/remote-pairing-v1.md`](docs/remote-pairing-v1.md) and
+[`docs/remote-protocol-v1.md`](docs/remote-protocol-v1.md).

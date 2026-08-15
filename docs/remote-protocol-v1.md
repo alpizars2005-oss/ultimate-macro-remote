@@ -21,6 +21,12 @@ protocol.
 - The credential identifies the device. No message may override that identity with a
   caller-supplied device ID.
 
+R2 obtains this credential out of band through the isolated temporary development
+pairing flow in [`remote-pairing-v1.md`](remote-pairing-v1.md). Pairing is not a
+protocol-1 message or operation. A pairing ticket is invalid on this WebSocket, and a
+device bearer is invalid on the pairing endpoint. Replacing development pairing with
+OAuth later does not change any HELLO, WELCOME, heartbeat, command, or update schema.
+
 Closed-schema fields are exact: snapshot keys are always present (the current strategy
 may be JSON `null`), while result/error fields that do not apply to a command update
 must be omitted rather than emitted as `null`. WebSocket fragmentation is handled by

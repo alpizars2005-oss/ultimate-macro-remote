@@ -22,6 +22,7 @@ from .protocol import (
     Operation,
     TERMINAL_COMMAND_STATUSES,
     format_utc,
+    parse_utc,
     utc_now,
     validate_command_arguments,
     validate_discord_user_id,
@@ -49,6 +50,20 @@ class StoreAuthorizationError(StoreError):
 
 class InvalidTransition(StoreError):
     pass
+
+
+class StorePairingInvalid(StoreError):
+    """Raised for every unusable development pairing ticket."""
+
+
+class StorePairingAlreadyLinked(StoreConflict):
+    """Raised when development pairing cannot create a second active device."""
+
+
+class StoreRateLimited(StoreError):
+    def __init__(self, retry_after_seconds: int) -> None:
+        super().__init__("Pairing rate limit exceeded.")
+        self.retry_after_seconds = max(1, retry_after_seconds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +102,15 @@ class CommandRecord:
     result: dict[str, object] | None
     error_code: str | None
     error_message: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class PairingRateRule:
+    scope: str
+    subject_hash: bytes
+    window_started_at: str
+    window_seconds: int
+    limit: int
 
 
 class RemoteStore:
@@ -163,6 +187,30 @@ class RemoteStore:
 
                 CREATE INDEX IF NOT EXISTS idx_devices_owner
                     ON devices(owner_discord_user_id);
+
+                CREATE TABLE IF NOT EXISTS pairing_tickets (
+                    ticket_id TEXT PRIMARY KEY,
+                    owner_discord_user_id TEXT NOT NULL,
+                    token_hash BLOB NOT NULL UNIQUE CHECK (length(token_hash) = 32),
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL,
+                    consumed_at TEXT,
+                    invalidated_at TEXT
+                );
+
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_one_live_pairing_ticket_per_owner
+                    ON pairing_tickets(owner_discord_user_id)
+                    WHERE consumed_at IS NULL AND invalidated_at IS NULL;
+
+                CREATE TABLE IF NOT EXISTS pairing_rate_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scope TEXT NOT NULL,
+                    subject_hash BLOB NOT NULL CHECK (length(subject_hash) = 32),
+                    occurred_at TEXT NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_pairing_rate_events
+                    ON pairing_rate_events(scope, subject_hash, occurred_at);
 
                 CREATE TABLE IF NOT EXISTS commands (
                     command_id TEXT PRIMARY KEY,
@@ -249,6 +297,183 @@ class RemoteStore:
             device = self.get_device(device_id)
             return ProvisionedDevice(device=device, credential=credential)
         raise StoreConflict("Could not allocate a unique device credential.")
+
+    def issue_pairing_ticket(
+        self,
+        *,
+        ticket_id: str,
+        owner_discord_user_id: str | int,
+        token_digest: bytes,
+        created_at: str,
+        expires_at: str,
+    ) -> None:
+        """Persist one hashed ticket issued for an authoritative Discord owner."""
+
+        owner = validate_discord_user_id(owner_discord_user_id)
+        if len(token_digest) != 32:
+            raise ValueError("Pairing token digests must be 32 bytes.")
+        with self._lock, self._connection:
+            linked = self._connection.execute(
+                """
+                SELECT 1 FROM devices
+                 WHERE owner_discord_user_id = ? AND revoked_at IS NULL
+                 LIMIT 1
+                """,
+                (owner,),
+            ).fetchone()
+            if linked is not None:
+                raise StorePairingAlreadyLinked("A Remote device is already linked.")
+            self._connection.execute(
+                """
+                UPDATE pairing_tickets
+                   SET invalidated_at = ?
+                 WHERE owner_discord_user_id = ?
+                   AND consumed_at IS NULL AND invalidated_at IS NULL
+                """,
+                (created_at, owner),
+            )
+            try:
+                self._connection.execute(
+                    """
+                    INSERT INTO pairing_tickets (
+                        ticket_id, owner_discord_user_id, token_hash,
+                        created_at, expires_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (ticket_id, owner, token_digest, created_at, expires_at),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise StoreConflict("Could not allocate a pairing ticket.") from exc
+
+    def record_pairing_rate_attempt(
+        self,
+        *,
+        occurred_at: str,
+        rate_rules: tuple[PairingRateRule, ...],
+    ) -> None:
+        """Persist rate-limit events before parsing, lookup, or rejection."""
+
+        with self._lock, self._connection:
+            self._enforce_pairing_rate_rules(rate_rules, occurred_at)
+
+    def redeem_pairing_ticket(
+        self, *, token_digest: bytes, consumed_at: str
+    ) -> ProvisionedDevice:
+        """Atomically consume a ticket and create exactly one device credential."""
+
+        if len(token_digest) != 32:
+            raise ValueError("Pairing token digests must be 32 bytes.")
+        device_id = str(uuid.uuid4())
+        secret = secrets.token_urlsafe(32)
+        credential = f"urad_v1.{device_id}.{secret}"
+        credential_digest = _credential_digest(credential)
+        invalidated_for_owner_conflict = False
+        with self._lock, self._connection:
+            conflict = self._connection.execute(
+                """
+                UPDATE pairing_tickets
+                   SET invalidated_at = ?
+                 WHERE token_hash = ?
+                   AND consumed_at IS NULL
+                   AND invalidated_at IS NULL
+                   AND expires_at > ?
+                   AND EXISTS (
+                       SELECT 1 FROM devices
+                        WHERE devices.owner_discord_user_id =
+                              pairing_tickets.owner_discord_user_id
+                          AND devices.revoked_at IS NULL
+                   )
+                RETURNING ticket_id
+                """,
+                (consumed_at, token_digest, consumed_at),
+            ).fetchone()
+            invalidated_for_owner_conflict = conflict is not None
+            row = None
+            if not invalidated_for_owner_conflict:
+                row = self._connection.execute(
+                    """
+                    UPDATE pairing_tickets
+                       SET consumed_at = ?
+                     WHERE token_hash = ?
+                       AND consumed_at IS NULL
+                       AND invalidated_at IS NULL
+                       AND expires_at > ?
+                       AND NOT EXISTS (
+                           SELECT 1 FROM devices
+                            WHERE devices.owner_discord_user_id =
+                                  pairing_tickets.owner_discord_user_id
+                              AND devices.revoked_at IS NULL
+                       )
+                    RETURNING owner_discord_user_id
+                    """,
+                    (consumed_at, token_digest, consumed_at),
+                ).fetchone()
+                if row is None:
+                    raise StorePairingInvalid("Pairing ticket is not usable.")
+                try:
+                    self._connection.execute(
+                        """
+                        INSERT INTO devices (
+                            device_id, owner_discord_user_id, credential_hash, created_at
+                        ) VALUES (?, ?, ?, ?)
+                        """,
+                        (
+                            device_id,
+                            row["owner_discord_user_id"],
+                            credential_digest,
+                            consumed_at,
+                        ),
+                    )
+                except sqlite3.IntegrityError as exc:
+                    raise StoreConflict(
+                        "Could not allocate a device credential."
+                    ) from exc
+        if invalidated_for_owner_conflict:
+            raise StorePairingInvalid("Pairing ticket is not usable.")
+        return ProvisionedDevice(
+            device=self.get_device(device_id), credential=credential
+        )
+
+    def _enforce_pairing_rate_rules(
+        self, rate_rules: tuple[PairingRateRule, ...], occurred_at: str
+    ) -> None:
+        for rule in rate_rules:
+            if (
+                not rule.scope
+                or len(rule.subject_hash) != 32
+                or rule.window_seconds <= 0
+                or rule.limit <= 0
+            ):
+                raise ValueError("Invalid pairing rate rule.")
+            self._connection.execute(
+                """
+                DELETE FROM pairing_rate_events
+                 WHERE scope = ? AND occurred_at <= ?
+                """,
+                (rule.scope, rule.window_started_at),
+            )
+            rows = self._connection.execute(
+                """
+                SELECT occurred_at FROM pairing_rate_events
+                 WHERE scope = ? AND subject_hash = ? AND occurred_at > ?
+                 ORDER BY occurred_at, event_id
+                """,
+                (rule.scope, rule.subject_hash, rule.window_started_at),
+            ).fetchall()
+            if len(rows) >= rule.limit:
+                retry_at = parse_utc(rows[0]["occurred_at"]).timestamp()
+                retry_at += rule.window_seconds
+                now = parse_utc(occurred_at).timestamp()
+                retry_seconds = int(max(1, retry_at - now + 0.999))
+                raise StoreRateLimited(min(rule.window_seconds, retry_seconds))
+        for rule in rate_rules:
+            self._connection.execute(
+                """
+                INSERT INTO pairing_rate_events (scope, subject_hash, occurred_at)
+                VALUES (?, ?, ?)
+                """,
+                (rule.scope, rule.subject_hash, occurred_at),
+            )
 
     def authenticate(self, credential: str) -> DeviceRecord | None:
         parsed = _parse_credential(credential)

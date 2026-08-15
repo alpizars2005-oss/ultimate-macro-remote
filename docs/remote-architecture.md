@@ -2,9 +2,9 @@
 
 ## Inspected baseline
 
-The branch was clean before this milestone. Its validated baseline was
-`5a487928190a43c8c3d4368c90e460bcbc2744ec` (`remote: preserve parent script across
-watchdog restarts`) on `feature/ultimate-remote-agent`.
+The branch was clean before R2 at `01648e5` on
+`feature/ultimate-remote-agent`. R1 is commit `07a751e` and remains based on the
+validated watchdog boundary in `5a48792`.
 
 `Main_Remote.ahk` already consumes START during startup and consumes STOP/SWITCH at the
 between-match safe gate after its initial disconnect/reconnect check and before the main
@@ -14,10 +14,10 @@ INI slot and its state/result file is under the interactive user's `%APPDATA%`. 
 milestone does not edit `Main.ahk`, `Main_Remote.ahk`, `submacros/watchdog.ahk`, or any
 gameplay loop.
 
-## Architecture after R1
+## Architecture after R2
 
 ```text
-Discord bot (future, central only)
+Discord bot (central only)
         |
         | in-process API using interaction.user.id
         v
@@ -25,7 +25,13 @@ RemoteService ---- SQLite device/owner/command state
         |
         | authenticated WSS /remote/v1/agent
         v
-simulated Agent (R1 tests)
+simulated Agent (R1/R2 tests)
+
+/macro pair -> PairingService -> hashed, expiring ticket in SQLite
+                                      |
+                                      | empty-body HTTPS POST /remote/v1/pair
+                                      v
+                         one-time R1 device credential
 
 UltimateRemoteAgent -> local AHK bridge -> Ultimate Macro -> Roblox
        (future)          (existing safe gate)
@@ -37,30 +43,40 @@ ownership-safe dispatch, one-mutating-command gate, lifecycle correlation, and a
 simulated-Agent integration test. `RemoteService.dispatch_for_user` takes the
 authoritative Discord user ID and has no device-ID parameter.
 
-R1 deliberately has no public provisioning API. `RemoteStore.provision_device` is an
-internal test/future-pairing primitive and is not proof that a user owns a Discord
-account.
+R2 adds a central-only Discord adapter and an isolated temporary development-pairing
+API. The five control commands pass `interaction.user.id` to `RemoteService` and accept
+no user or device selector. `/macro pair` binds a 256-bit ticket to that same identity;
+only the ticket digest is stored. Redemption is rate-limited and atomically consumes
+the ticket while creating the existing R1 device bearer. `RemoteStore.provision_device`
+remains an internal test primitive and is not exposed by HTTP or Discord.
 
 For local backend development after installing `requirements.txt`, run
 `python -m central.server`. It binds `127.0.0.1:8765`, stores state under
-`runtime/central`, and exposes only `/healthz` plus the authenticated Agent WebSocket.
+`runtime/central`, and exposes `/healthz`, the authenticated Agent WebSocket, and the
+ticket-redemption endpoint. It does not run the Discord ticket issuer. Run `bot.py` (or
+`python -m central.runtime`) for the single-process R2 Discord + HTTP runtime.
 The store holds a process-lifetime `remote.db.lock` and refuses a second backend writer;
 the SQLite directory is local to PC A and must not be shared over a network filesystem.
 The simulated-Agent integration suite is the supported R1 exercise path.
 
+## R2 security boundary
+
+The Discord client is configured with `AllowedMentions.none()`, every command response
+is ephemeral, and Agent strategy names are treated as untrusted display text: control
+characters are removed, Discord mentions and markdown are escaped, output is bounded,
+and autocomplete submits only opaque strategy IDs. Agent `error_message` values are
+never rendered. Stable error codes map to fixed user-facing text; unknown codes get a
+generic message. The legacy local bot behavior, `/macro cancel`, local strategy paths,
+AHK launch, and manually configured allowed-user ID are absent from the central runtime.
+
+Pairing is outside protocol 1 and can later be replaced by OAuth without changing the
+Agent command schema. Tickets use 256 random bits, expire after ten minutes by default,
+are single-use and hash-only in SQLite, supersede older live tickets, and are limited
+per Discord owner, direct socket peer, and globally. Redemption accepts the ticket only
+in `Authorization: Pairing …`; it accepts no body/query identity data and returns the
+device bearer once with no-store headers. See `remote-pairing-v1.md`.
+
 ## Smallest remaining vertical-slice milestones
-
-### R2 — central Discord surface and temporary development pairing
-
-Create `central/discord_bot.py`, `central/pairing.py`, and `central/runtime.py`; replace
-the local behavior in top-level `bot.py` with a central launcher; add pairing and bot
-service tests. Slash commands call the in-process `RemoteService`, always use
-`interaction.user.id`, remain ephemeral, escape Agent-provided text, and disable
-Discord mentions. A temporary pairing ticket must be at
-least 128 random bits, short-lived, single-use, stored hashed, rate-limited, and bound
-to the invoking Discord user before an Agent can redeem it over TLS. It must be isolated
-for later OAuth replacement. No Discord ID, guild ID, device ID, bot token, or backend
-secret is entered on the client PC.
 
 ### R3 — self-contained Windows Agent transport and read-only bridge
 
@@ -129,7 +145,7 @@ after the Discord snowflake is persisted. The client secret remains only on PC A
 Discord's official OAuth documentation describes the exact redirect and `state`
 requirements: <https://docs.discord.com/developers/topics/oauth2>.
 
-That OAuth implementation is not attempted in R1 because this workspace has no stable
+That OAuth implementation is not attempted in R2 because this workspace has no stable
 public HTTPS base URL, trusted TLS termination, registered Discord redirect URI, OAuth
 client ID/secret configuration, or WebSocket-capable public routing. Do not silently
 infer identity from guild membership, usernames, or a manually typed Discord ID.

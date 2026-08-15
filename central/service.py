@@ -69,7 +69,7 @@ class AgentSession:
 
 
 class RemoteService:
-    """In-process API shared by the WebSocket server and the future Discord bot."""
+    """In-process API shared by the WebSocket server and central Discord bot."""
 
     def __init__(self, store: RemoteStore, *, command_delivery_ttl_seconds: int) -> None:
         self.store = store

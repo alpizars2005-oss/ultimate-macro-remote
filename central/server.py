@@ -7,6 +7,7 @@ import ssl
 from aiohttp import WSMsgType, web
 
 from .config import RemoteConfig
+from .pairing import PairingError, PairingService
 from .protocol import (
     CommandUpdateMessage,
     HeartbeatMessage,
@@ -24,9 +25,15 @@ from .store import StoreError
 
 
 LOGGER = logging.getLogger("ultimate_remote.central")
+_PAIRING_HTTP_MESSAGES = {
+    "PAIRING_INVALID": "Pairing ticket is invalid or no longer usable.",
+    "PAIRING_RATE_LIMITED": "Too many pairing attempts. Try again later.",
+    "PAIRING_UNAVAILABLE": "Pairing is temporarily unavailable.",
+}
 CONFIG_KEY = web.AppKey("remote_config", RemoteConfig)
 SERVICE_KEY = web.AppKey("remote_service", RemoteService)
 STORE_KEY = web.AppKey("remote_store", RemoteStore)
+PAIRING_KEY = web.AppKey("pairing_service", PairingService)
 
 
 def create_app(
@@ -34,6 +41,7 @@ def create_app(
     *,
     store: RemoteStore | None = None,
     service: RemoteService | None = None,
+    pairing_service: PairingService | None = None,
 ) -> web.Application:
     config.validate()
     if service is not None:
@@ -47,11 +55,16 @@ def create_app(
             remote_store,
             command_delivery_ttl_seconds=config.command_delivery_ttl_seconds,
         )
+    if pairing_service is not None and pairing_service.store is not remote_store:
+        raise ValueError("Injected PairingService and RemoteStore must match.")
+    pairing = pairing_service or PairingService(remote_store)
     app = web.Application(client_max_size=MAX_MESSAGE_BYTES)
     app[CONFIG_KEY] = config
     app[STORE_KEY] = remote_store
     app[SERVICE_KEY] = remote_service
+    app[PAIRING_KEY] = pairing
     app.router.add_get("/healthz", _health)
+    app.router.add_post("/remote/v1/pair", _redeem_pairing_ticket)
     app.router.add_get("/remote/v1/agent", _agent_websocket)
     app.on_cleanup.append(_cleanup)
     return app
@@ -59,6 +72,49 @@ def create_app(
 
 async def _health(_: web.Request) -> web.Response:
     return web.json_response({"status": "ok", "protocol": PROTOCOL_VERSION})
+
+
+async def _redeem_pairing_ticket(request: web.Request) -> web.Response:
+    """Redeem a Discord-issued development ticket without accepting identity data."""
+
+    has_forbidden_body = request.can_read_body
+    ticket = _pairing_credential(request)
+    if has_forbidden_body or request.query_string:
+        ticket = ""
+    try:
+        redemption = request.app[PAIRING_KEY].redeem(
+            ticket or "", peer_source=_peer_source(request)
+        )
+    except PairingError as exc:
+        headers = _no_store_headers()
+        if exc.retry_after_seconds is not None:
+            headers["Retry-After"] = str(exc.retry_after_seconds)
+        if exc.http_status == 401:
+            headers["WWW-Authenticate"] = "Pairing"
+        response = web.json_response(
+            {
+                "error": {
+                    "code": exc.code,
+                    "message": _PAIRING_HTTP_MESSAGES.get(
+                        exc.code, "Pairing could not be completed."
+                    ),
+                }
+            },
+            status=exc.http_status,
+            headers=headers,
+        )
+        if has_forbidden_body:
+            response.force_close()
+        return response
+    return web.json_response(
+        {
+            "protocol": PROTOCOL_VERSION,
+            "device_credential": redemption.device_credential,
+            "agent_websocket_path": "/remote/v1/agent",
+        },
+        status=201,
+        headers=_no_store_headers(),
+    )
 
 
 async def _agent_websocket(request: web.Request) -> web.StreamResponse:
@@ -147,12 +203,34 @@ def _bearer_credential(request: web.Request) -> str | None:
     return credential
 
 
+def _pairing_credential(request: web.Request) -> str | None:
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Pairing ") or header.count(" ") != 1:
+        return None
+    credential = header[8:]
+    if not credential or len(credential) > 96:
+        return None
+    return credential
+
+
+def _peer_source(request: web.Request) -> str:
+    transport = request.transport
+    peer = transport.get_extra_info("peername") if transport is not None else None
+    if isinstance(peer, tuple) and peer and isinstance(peer[0], str):
+        return peer[0]
+    return "unknown"
+
+
+def _no_store_headers() -> dict[str, str]:
+    return {"Cache-Control": "no-store", "Pragma": "no-cache"}
+
+
 async def _cleanup(app: web.Application) -> None:
     await app[SERVICE_KEY].close()
     app[STORE_KEY].close()
 
 
-def _ssl_context(config: RemoteConfig) -> ssl.SSLContext | None:
+def build_ssl_context(config: RemoteConfig) -> ssl.SSLContext | None:
     if config.tls_certificate is None or config.tls_private_key is None:
         return None
     context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
@@ -171,7 +249,7 @@ def main() -> None:
         create_app(config),
         host=config.bind_host,
         port=config.bind_port,
-        ssl_context=_ssl_context(config),
+        ssl_context=build_ssl_context(config),
         access_log=None,
     )
 
