@@ -34,10 +34,13 @@ Settings.tds
 *.tmp
 *.temp
 *.db
+*.db-journal
 *.db-shm
 *.db-wal
 *.sqlite
+*.sqlite-journal
 *.sqlite3
+*.sqlite3-journal
 *.lock
 
 # Generated build and editor artifacts
