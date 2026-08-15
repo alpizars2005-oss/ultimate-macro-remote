@@ -1,0 +1,47 @@
+# Local environment and generated secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+credentials*.json
+secrets*.json
+
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Runtime state, diagnostics, and temporary files
+logs/
+log/
+*.log
+*.log.*
+runtime/
+remote_command.ini
+state.ini
+Settings.tds
+*.pid
+*.tmp
+*.temp
+
+# Generated build and editor artifacts
+bin/
+obj/
+build/
+dist/
+*.user
+*.suo
+.vs/
+.idea/
+Thumbs.db
+Desktop.ini
