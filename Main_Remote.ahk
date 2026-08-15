@@ -7040,13 +7040,31 @@ SafeReload() {
     Reload()
 }
 
+CanonicalWatchdogParentPath(path) {
+    requiredChars := DllCall("Kernel32\GetFullPathNameW", "Str", path, "UInt", 0, "Ptr", 0, "Ptr", 0, "UInt")
+    if (!requiredChars)
+        return ""
+
+    pathBuffer := Buffer(requiredChars * 2, 0)
+    writtenChars := DllCall("Kernel32\GetFullPathNameW", "Str", path, "UInt", requiredChars, "Ptr", pathBuffer.Ptr, "Ptr", 0, "UInt")
+    if (!writtenChars || writtenChars >= requiredChars)
+        return ""
+
+    return StrGet(pathBuffer.Ptr, writtenChars, "UTF-16")
+}
+
 startWatchdog() {
-    currentPID := DllCall("GetCurrentProcessId")
-    if (A_PtrSize == 4) {
-    Run('"' A_ScriptDir '\submacros\AutoHotkey32.exe" "' A_ScriptDir '\submacros\watchdog.ahk" ' currentPID, , , &watchdogPID)
-    } else {
-    Run('"' A_ScriptDir '\submacros\AutoHotkey64.exe" "' A_ScriptDir '\submacros\watchdog.ahk" ' currentPID, , , &watchdogPID)
-    }
+    global watchdogPID
+
+    currentPID := DllCall("Kernel32\GetCurrentProcessId", "UInt")
+    parentScriptPath := CanonicalWatchdogParentPath(A_ScriptFullPath)
+    if (parentScriptPath = "" || !FileExist(parentScriptPath))
+        throw Error("Cannot start watchdog without a valid parent script path.")
+
+    watchdogExe := A_ScriptDir "\submacros\AutoHotkey" (A_PtrSize == 4 ? "32" : "64") ".exe"
+    watchdogScript := A_ScriptDir "\submacros\watchdog.ahk"
+    watchdogCommand := '"' watchdogExe '" "' watchdogScript '" ' currentPID ' "' parentScriptPath '"'
+    Run(watchdogCommand, A_ScriptDir, , &watchdogPID)
 }
 
 KillSubmacros() {
