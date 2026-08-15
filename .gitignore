@@ -33,6 +33,12 @@ Settings.tds
 *.pid
 *.tmp
 *.temp
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.lock
 
 # Generated build and editor artifacts
 bin/
