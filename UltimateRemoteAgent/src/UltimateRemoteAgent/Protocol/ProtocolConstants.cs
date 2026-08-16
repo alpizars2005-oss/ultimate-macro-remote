@@ -6,11 +6,14 @@ public static class ProtocolConstants
     public const int MaximumMessageBytes = 64 * 1024;
     public const int MaximumStrategies = 500;
 
-    public static IReadOnlyList<RemoteOperation> R3Capabilities { get; } =
+    public static IReadOnlyList<RemoteOperation> AgentCapabilities { get; } =
         Array.AsReadOnly(
             new[]
             {
                 RemoteOperation.GetStatus,
                 RemoteOperation.ListStrategies,
+                RemoteOperation.StartStrategy,
+                RemoteOperation.StopSafe,
+                RemoteOperation.SwitchStrategy,
             });
 }
