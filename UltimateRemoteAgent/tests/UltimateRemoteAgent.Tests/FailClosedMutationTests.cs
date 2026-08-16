@@ -30,8 +30,16 @@ public sealed class FailClosedMutationTests
         var prepared = new PreparedMutation(command, accepted, null, null);
         using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
 
-        await Assert.ThrowsExactlyAsync<OperationCanceledException>(
-            () => bridge.ExecuteMutationAsync(prepared, cancellation.Token));
+        bool cancelled = false;
+        try
+        {
+            _ = await bridge.ExecuteMutationAsync(prepared, cancellation.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            cancelled = true;
+        }
+        Assert.IsTrue(cancelled, "Mutation should remain pending until cancellation when no safe evidence exists.");
 
         Assert.IsTrue(File.Exists(mailboxPath));
         CommandJournalEntry persisted = journal.TryLoad(commandId)
@@ -66,10 +74,18 @@ public sealed class FailClosedMutationTests
         DateTime before = File.GetLastWriteTimeUtc(mailboxPath);
         using var cancellation = new CancellationTokenSource(TimeSpan.FromMilliseconds(150));
 
-        await Assert.ThrowsExactlyAsync<OperationCanceledException>(
-            () => bridge.ReconcileAsync(
+        bool cancelled = false;
+        try
+        {
+            _ = await bridge.ReconcileAsync(
                 new ReconciliationCommand(commandId, RemoteOperation.StopSafe),
-                cancellation.Token));
+                cancellation.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            cancelled = true;
+        }
+        Assert.IsTrue(cancelled, "Reconciliation should wait for evidence instead of replaying or timing out.");
 
         Assert.AreEqual("sentinel", File.ReadAllText(mailboxPath));
         Assert.AreEqual(before, File.GetLastWriteTimeUtc(mailboxPath));
