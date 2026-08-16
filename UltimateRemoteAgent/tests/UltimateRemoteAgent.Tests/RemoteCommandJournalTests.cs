@@ -34,7 +34,8 @@ public sealed class RemoteCommandJournalTests
                 ActionResult.StrategyStarted,
                 snapshot);
 
-            CommandJournalEntry loaded = Assert.IsNotNull(journal.TryLoad(id));
+            CommandJournalEntry loaded = journal.TryLoad(id)
+                ?? throw new AssertFailedException("Journal entry was not persisted.");
             Assert.AreEqual(JournalStage.Completed, loaded.Stage);
             Assert.AreEqual(123U, loaded.BaselineTimeWhenStartedPlaying);
             Assert.AreEqual(7L, loaded.BaselineRunCount);
