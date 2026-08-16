@@ -101,6 +101,15 @@ async def run_runtime(
         )
         await site.start()
         LOGGER.info("Central Remote runtime started.")
+        if onboarding_options is not None and onboarding_options.enabled:
+            LOGGER.info("Discord OAuth onboarding enabled at %s", onboarding_options.redirect_uri)
+        elif pairing_options.public_https_origin:
+            LOGGER.info(
+                "Discord OAuth onboarding disabled; development /macro pair remains available at %s",
+                pairing_options.public_https_origin,
+            )
+        else:
+            LOGGER.info("Discord OAuth onboarding disabled; development pairing is loopback-only.")
         await components.discord_client.start(
             discord_options.token, reconnect=True
         )
@@ -117,13 +126,22 @@ async def run_runtime(
                 components.store.close()
 
 
-def _onboarding_options_from_environment() -> OnboardingOptions:
+def onboarding_options_from_environment() -> OnboardingOptions:
+    client_id = os.getenv("DISCORD_CLIENT_ID", "").strip()
+    client_secret = os.getenv("DISCORD_CLIENT_SECRET", "").strip()
+    public_origin = os.getenv("ULTIMATE_REMOTE_PUBLIC_HTTPS_ORIGIN", "").strip()
+
+    # ULTIMATE_REMOTE_PUBLIC_HTTPS_ORIGIN is shared with R2/R3 development pairing.
+    # A public origin by itself therefore means "pairing enabled, OAuth disabled".
+    # OAuth becomes configured only when either OAuth credential is present; at that
+    # point OnboardingOptions.validate() requires the complete credential+origin set.
+    if not client_id and not client_secret:
+        return OnboardingOptions()
+
     return OnboardingOptions(
-        client_id=os.getenv("DISCORD_CLIENT_ID", "").strip(),
-        client_secret=os.getenv("DISCORD_CLIENT_SECRET", "").strip(),
-        public_https_origin=os.getenv(
-            "ULTIMATE_REMOTE_PUBLIC_HTTPS_ORIGIN", ""
-        ).strip(),
+        client_id=client_id,
+        client_secret=client_secret,
+        public_https_origin=public_origin,
         session_ttl_seconds=int(
             os.getenv("ULTIMATE_REMOTE_ONBOARDING_TTL_SECONDS", "600")
         ),
@@ -139,17 +157,37 @@ def _onboarding_options_from_environment() -> OnboardingOptions:
     )
 
 
+def load_runtime_options() -> tuple[
+    RemoteConfig,
+    DiscordBotOptions,
+    PairingOptions,
+    OnboardingOptions,
+]:
+    remote_config = RemoteConfig.from_environment()
+    discord_options = DiscordBotOptions.from_environment()
+    pairing_options = PairingOptions.from_environment()
+    onboarding_options = onboarding_options_from_environment()
+    onboarding_options.validate()
+    return remote_config, discord_options, pairing_options, onboarding_options
+
+
 def main() -> None:
     load_dotenv(PROJECT_ROOT / ".env")
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    remote_config = RemoteConfig.from_environment()
-    discord_options = DiscordBotOptions.from_environment()
-    pairing_options = PairingOptions.from_environment()
-    onboarding_options = _onboarding_options_from_environment()
-    onboarding_options.validate()
+    try:
+        (
+            remote_config,
+            discord_options,
+            pairing_options,
+            onboarding_options,
+        ) = load_runtime_options()
+    except (ValueError, RuntimeError) as exc:
+        LOGGER.error("Remote configuration error: %s", exc)
+        raise SystemExit(2) from None
+
     try:
         asyncio.run(
             run_runtime(
