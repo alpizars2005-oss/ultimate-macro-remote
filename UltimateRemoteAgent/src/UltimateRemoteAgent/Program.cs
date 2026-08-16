@@ -63,12 +63,7 @@ internal static class Program
         Uri validatedOrigin = EnrollmentValidator.ValidateOrigin(origin);
         string macroRoot = EnrollmentValidator.ValidateMacroRoot(macroRootText, requireFiles: true);
 
-        // Validating the approved root before ticket redemption prevents binding a
-        // credential to an installation whose catalog escapes through a reparse point.
         _ = StrategyCatalog.Load(macroRoot);
-        // Validate the fixed executable and Remote entrypoint through final handles too.
-        // A one-shot pairing ticket must not be consumed for an installation that the
-        // exact-process census would later refuse to inspect.
         _ = new WmiMacroProcessCensus(macroRoot);
         string ticket = SecretConsole.ReadPairingTicket();
         PairingResult result;
@@ -99,7 +94,7 @@ internal static class Program
     {
         var store = new DpapiEnrollmentStore(DpapiEnrollmentStore.DefaultPath);
         EnrollmentRecord enrollment = store.Load();
-        using var bridge = new ReadOnlyLocalBridge(enrollment.MacroRoot);
+        using var bridge = new RemoteLocalBridge(enrollment.MacroRoot);
         var host = new AgentHost(enrollment, bridge);
         using var cancellation = new CancellationTokenSource();
         ConsoleCancelEventHandler handler = (_, eventArgs) =>
@@ -156,7 +151,7 @@ internal static class Program
 
     private static int PrintUsage()
     {
-        Console.Error.WriteLine("UltimateRemoteAgent 0.3.0");
+        Console.Error.WriteLine("UltimateRemoteAgent 0.4.0");
         Console.Error.WriteLine("  UltimateRemoteAgent.exe pair <https-origin> <macro-root>");
         Console.Error.WriteLine("  UltimateRemoteAgent.exe run");
         Console.Error.WriteLine("  UltimateRemoteAgent.exe inspect <macro-root>");
