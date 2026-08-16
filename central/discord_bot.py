@@ -21,7 +21,7 @@ LOGGER = logging.getLogger("ultimate_remote.discord")
 NO_MENTIONS = discord.AllowedMentions.none()
 
 _SERVICE_ERROR_MESSAGES = {
-    "DEVICE_NOT_LINKED": "No Remote device is linked. Use `/macro pair` to create a development pairing ticket.",
+    "DEVICE_NOT_LINKED": "No Remote device is linked. Open Ultimate Macro once on that PC, accept Remote, and choose **Connect Discord**.",
     "DEVICE_OFFLINE": "The linked device is offline or not connected.",
     "MULTIPLE_DEVICES": "More than one device is linked. Device selection is not available in this milestone.",
     "OPERATION_UNSUPPORTED": "The connected Agent does not support that Remote operation.",
@@ -38,7 +38,14 @@ _AGENT_ERROR_MESSAGES = {
     "NOT_PRESENT_LOCALLY": "The Agent could not reconcile this command from its durable local journal. It was not replayed; verify Remote state before retrying.",
     "MACRO_ALREADY_RUNNING": "The macro is already running. Use `/macro switch` instead.",
     "MACRO_NOT_RUNNING": "The macro is not currently running.",
+    "MACRO_STATE_UNKNOWN": "The Agent could not prove the local macro state safely. Verify the device before retrying.",
+    "MACRO_BRIDGE_REJECTED": "Ultimate Macro safely rejected the Remote request.",
+    "COMMAND_IN_PROGRESS": "The device is already processing another safe-boundary request.",
     "MAILBOX_BUSY": "The device is already processing another safe-boundary request.",
+    "RECONCILIATION_INDETERMINATE": "The previous gameplay-changing request could not be proven safely. Do not retry until Remote state is verified.",
+    "LOCAL_MUTATION_FAILED": "The requested local Remote action could not be completed safely.",
+    "START_CONFIRMATION_TIMEOUT": "The requested strategy start could not be confirmed.",
+    "SAFE_BOUNDARY_TIMEOUT": "The macro did not confirm the requested safe-boundary action.",
     "DEVICE_REVOKED_OUTCOME_UNKNOWN": "The device was revoked while this command was unresolved. Its local outcome is unknown.",
     "SERVER_RESTART": "The central service restarted before the read completed.",
     "SERVER_RESTART_READ_FAILED": "The central service restarted before the read completed.",
