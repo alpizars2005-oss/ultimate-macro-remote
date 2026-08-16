@@ -8,8 +8,13 @@ from unittest import mock
 
 from central.config import RemoteConfig
 from central.discord_bot import DiscordBotOptions
+from central.onboarding import OnboardingConfigurationError
 from central.pairing import PairingOptions
-from central.runtime import create_runtime_components, run_runtime
+from central.runtime import (
+    create_runtime_components,
+    onboarding_options_from_environment,
+    run_runtime,
+)
 from central.server import PAIRING_KEY, SERVICE_KEY, STORE_KEY
 
 
@@ -76,3 +81,57 @@ class RemoteRuntimeTests(unittest.IsolatedAsyncioTestCase):
         ):
             options = DiscordBotOptions.from_environment()
         self.assertIsNone(options.guild_id)
+
+    def test_public_origin_alone_keeps_r3_pairing_compatible_and_oauth_disabled(self) -> None:
+        origin = "https://remote.example"
+        with mock.patch.dict(
+            os.environ,
+            {"ULTIMATE_REMOTE_PUBLIC_HTTPS_ORIGIN": origin},
+            clear=True,
+        ):
+            pairing = PairingOptions.from_environment()
+            onboarding = onboarding_options_from_environment()
+            onboarding.validate()
+
+        self.assertEqual(origin, pairing.public_https_origin)
+        self.assertFalse(onboarding.enabled)
+        self.assertEqual("", onboarding.public_https_origin)
+
+    def test_complete_r5_oauth_uses_the_same_shared_public_origin(self) -> None:
+        origin = "https://remote.example"
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DISCORD_CLIENT_ID": "123456789012345678",
+                "DISCORD_CLIENT_SECRET": "x" * 32,
+                "ULTIMATE_REMOTE_PUBLIC_HTTPS_ORIGIN": origin,
+            },
+            clear=True,
+        ):
+            pairing = PairingOptions.from_environment()
+            onboarding = onboarding_options_from_environment()
+            onboarding.validate()
+
+        self.assertEqual(origin, pairing.public_https_origin)
+        self.assertTrue(onboarding.enabled)
+        self.assertEqual(
+            origin + "/remote/v1/onboarding/discord/callback",
+            onboarding.redirect_uri,
+        )
+
+    def test_partial_r5_oauth_credentials_still_fail_closed(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DISCORD_CLIENT_ID": "123456789012345678",
+                "ULTIMATE_REMOTE_PUBLIC_HTTPS_ORIGIN": "https://remote.example",
+            },
+            clear=True,
+        ):
+            onboarding = onboarding_options_from_environment()
+            with self.assertRaises(OnboardingConfigurationError):
+                onboarding.validate()
+
+
+if __name__ == "__main__":
+    unittest.main()
