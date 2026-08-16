@@ -39,6 +39,14 @@ jobs:
       - name: Test
         shell: pwsh
         run: dotnet test .\UltimateRemoteAgent\UltimateRemoteAgent.slnx -c Release --no-build
+      - name: Verify formatting
+        shell: pwsh
+        run: dotnet format .\UltimateRemoteAgent\UltimateRemoteAgent.slnx --verify-no-changes --no-restore
       - name: Publish self-contained Agent
         shell: pwsh
         run: dotnet publish .\UltimateRemoteAgent\src\UltimateRemoteAgent\UltimateRemoteAgent.csproj -c Release -p:PublishProfile=win-x64
+      - name: Smoke-build zero-config client package
+        shell: pwsh
+        run: |
+          .\tools\package_remote_preview.ps1 -PublicOrigin https://remote.example -OutputDirectory .\ci-package
+          if (-not (Test-Path .\ci-package\Ultimate_Macro_Remote_Preview.zip)) { throw "Client package was not produced." }
