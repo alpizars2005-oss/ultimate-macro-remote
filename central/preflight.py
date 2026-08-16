@@ -67,7 +67,7 @@ def run_preflight(*, require_oauth: bool = False) -> int:
     present_legacy = [key for key in LEGACY_KEYS if os.getenv(key, "").strip()]
     if present_legacy:
         print(
-            "[Remote] WARNING: legacy variables are present and ignored/deprecated: "
+            "[Remote] WARNING: legacy variables are present; migrate/remove when convenient: "
             + ", ".join(present_legacy)
         )
 
