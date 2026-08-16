@@ -5,6 +5,26 @@ if (A_LineFile = A_ScriptFullPath) {
     ExitApp()
 }
 
+RemoteBootstrapIfPackaged() {
+    ; Remote is strictly optional. Stock Ultimate Macro behavior is unchanged when
+    ; the Agent/config is not packaged, and the Agent owns all consent/onboarding UI.
+    if (A_ScriptName != "Main_Remote.ahk")
+        return
+
+    agentExe := A_ScriptDir "\UltimateRemoteAgent.exe"
+    serviceConfig := A_ScriptDir "\remote_service.url"
+    if (!FileExist(agentExe) || !FileExist(serviceConfig))
+        return
+
+    try {
+        Run('"' agentExe '" bootstrap "' A_ScriptDir '"', A_ScriptDir, "Hide")
+    } catch {
+        ; Remote setup must never prevent the normal macro UI from starting.
+    }
+}
+
+RemoteBootstrapIfPackaged()
+
 CheckForUpdate(currentVer) {
     try {
         whr := ComObject("WinHttp.WinHttpRequest.5.1")
