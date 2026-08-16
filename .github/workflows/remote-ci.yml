@@ -3,8 +3,6 @@ name: Ultimate Remote CI
 on:
   pull_request:
     branches: [main]
-  push:
-    branches: [feature/ultimate-remote-agent]
 
 permissions:
   contents: read
