@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using UltimateRemoteAgent.Commands;
 using UltimateRemoteAgent.Local;
@@ -11,7 +12,9 @@ public sealed class RemoteCommandDispatcherTests
     private static readonly Guid CommandId =
         Guid.Parse("11111111-1111-4111-8111-111111111111");
     private static readonly DateTimeOffset ServerNow =
-        DateTimeOffset.Parse("2026-08-15T18:00:10.000+00:00");
+        DateTimeOffset.Parse(
+            "2026-08-15T18:00:10.000+00:00",
+            CultureInfo.InvariantCulture);
 
     [TestMethod]
     public async Task StartSendsAcceptedExecutingAndTypedCompletion()
