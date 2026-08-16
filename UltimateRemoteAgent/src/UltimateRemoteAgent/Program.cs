@@ -13,10 +13,10 @@ internal static class Program
     {
         try
         {
-            if (args is ["bootstrap", string macroRoot])
+            if (args is ["bootstrap", string bootstrapMacroRoot])
             {
                 NativeConsole.Hide();
-                return await RemoteBootstrap.RunAsync(macroRoot, CancellationToken.None)
+                return await RemoteBootstrap.RunAsync(bootstrapMacroRoot, CancellationToken.None)
                     .ConfigureAwait(false);
             }
 
@@ -31,10 +31,10 @@ internal static class Program
             {
                 ["run"] or ["run-background"] =>
                     await RunAgentAsync().ConfigureAwait(false),
-                ["pair", string origin, string macroRoot] =>
-                    await PairAsync(origin, macroRoot).ConfigureAwait(false),
-                ["inspect", string macroRoot] =>
-                    await InspectAsync(macroRoot).ConfigureAwait(false),
+                ["pair", string origin, string pairMacroRoot] =>
+                    await PairAsync(origin, pairMacroRoot).ConfigureAwait(false),
+                ["inspect", string inspectMacroRoot] =>
+                    await InspectAsync(inspectMacroRoot).ConfigureAwait(false),
                 _ => PrintUsage(),
             };
         }
