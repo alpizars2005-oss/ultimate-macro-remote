@@ -190,31 +190,35 @@ internal sealed partial class OnboardingClient : IDisposable
         string setupSecret,
         CancellationToken cancellationToken)
     {
-        var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
+        using var request = new HttpRequestMessage(HttpMethod.Post, endpoint);
         request.Headers.Authorization = new AuthenticationHeaderValue("Onboarding", setupSecret);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         request.Content = null;
+        HttpResponseMessage response;
         try
         {
-            HttpResponseMessage response = await _client.SendAsync(
+            response = await _client.SendAsync(
                 request,
                 HttpCompletionOption.ResponseHeadersRead,
                 cancellationToken).ConfigureAwait(false);
-            request.Dispose();
-            if (response.Headers.Location is not null ||
-                response.Content.Headers.ContentLength > MaxResponseBytes ||
-                response.Headers.CacheControl?.NoStore != true)
-            {
-                response.Dispose();
-                throw new OnboardingClientException("ONBOARDING_RESPONSE_INVALID");
-            }
-            return response;
         }
-        catch
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
-            request.Dispose();
-            throw;
+            throw new OnboardingClientException("ONBOARDING_NETWORK_FAILED", exception);
         }
+        catch (Exception exception) when (exception is HttpRequestException or IOException)
+        {
+            throw new OnboardingClientException("ONBOARDING_NETWORK_FAILED", exception);
+        }
+
+        if (response.Headers.Location is not null ||
+            response.Content.Headers.ContentLength > MaxResponseBytes ||
+            response.Headers.CacheControl?.NoStore != true)
+        {
+            response.Dispose();
+            throw new OnboardingClientException("ONBOARDING_RESPONSE_INVALID");
+        }
+        return response;
     }
 
     private static async Task<JsonElement> ReadObjectAsync(
@@ -251,28 +255,39 @@ internal sealed partial class OnboardingClient : IDisposable
         HttpContent content,
         CancellationToken cancellationToken)
     {
-        await using Stream input = await content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        using var output = new MemoryStream();
-        byte[] buffer = new byte[4096];
         try
         {
-            while (true)
+            await using Stream input = await content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
+            using var output = new MemoryStream();
+            byte[] buffer = new byte[4096];
+            try
             {
-                int read = await input.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
-                if (read == 0)
+                while (true)
                 {
-                    return output.ToArray();
+                    int read = await input.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+                    if (read == 0)
+                    {
+                        return output.ToArray();
+                    }
+                    if (output.Length + read > MaxResponseBytes)
+                    {
+                        throw new OnboardingClientException("ONBOARDING_RESPONSE_INVALID");
+                    }
+                    output.Write(buffer, 0, read);
                 }
-                if (output.Length + read > MaxResponseBytes)
-                {
-                    throw new OnboardingClientException("ONBOARDING_RESPONSE_INVALID");
-                }
-                output.Write(buffer, 0, read);
+            }
+            finally
+            {
+                CryptographicOperations.ZeroMemory(buffer);
             }
         }
-        finally
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
         {
-            CryptographicOperations.ZeroMemory(buffer);
+            throw new OnboardingClientException("ONBOARDING_NETWORK_FAILED", exception);
+        }
+        catch (Exception exception) when (exception is HttpRequestException or IOException)
+        {
+            throw new OnboardingClientException("ONBOARDING_NETWORK_FAILED", exception);
         }
     }
 
@@ -292,7 +307,7 @@ internal sealed partial class OnboardingClient : IDisposable
                 return new OnboardingClientException(code.GetString()!);
             }
         }
-        catch (OnboardingClientException)
+        catch (OnboardingClientException exception) when (exception.Code != "ONBOARDING_NETWORK_FAILED")
         {
         }
         return new OnboardingClientException("ONBOARDING_REJECTED");
