@@ -20,7 +20,7 @@ internal static partial class SafeLog
 
     private static void Write(string level, string code)
     {
-        string safeCode = LogCodePattern().IsMatch(code ?? string.Empty)
+        string safeCode = LogCodePattern().IsMatch(code)
             ? code
             : "INVALID_LOG_CODE";
         Console.Error.WriteLine($"{DateTimeOffset.UtcNow:O} {level} {safeCode}");
