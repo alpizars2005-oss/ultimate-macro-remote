@@ -20,9 +20,9 @@ public sealed class RemoteMailboxTests
             mailbox.Enqueue(first, "stop", null);
 
             byte[] payload = File.ReadAllBytes(path);
-            Assert.IsGreaterThanOrEqualTo(payload.Length, 2);
-            Assert.AreEqual(0xff, payload[0]);
-            Assert.AreEqual(0xfe, payload[1]);
+            Assert.IsTrue(payload.Length >= 2);
+            Assert.AreEqual((byte)0xff, payload[0]);
+            Assert.AreEqual((byte)0xfe, payload[1]);
             string text = BoundedIni.Decode(payload, 16 * 1024);
             Dictionary<string, string> section = BoundedIni.ReadSection(text, "Command");
             Assert.AreEqual(first.ToString("D"), section["Id"]);
