@@ -18,6 +18,8 @@ internal sealed record CommandJournalEntry(
     RemoteOperation Operation,
     string? StrategyId,
     JournalStage Stage,
+    uint BaselineTimeWhenStartedPlaying,
+    long BaselineRunCount,
     ActionResult? ActionResult,
     MacroSnapshot? Snapshot,
     string? ErrorCode,
@@ -41,7 +43,10 @@ internal sealed class RemoteCommandJournal
             "v1"));
     }
 
-    internal CommandJournalEntry CreateAccepted(CommandMessage command)
+    internal CommandJournalEntry CreateAccepted(
+        CommandMessage command,
+        uint baselineTimeWhenStartedPlaying,
+        long baselineRunCount)
     {
         var entry = new CommandJournalEntry(
             CommandJournalEntry.CurrentVersion,
@@ -49,6 +54,8 @@ internal sealed class RemoteCommandJournal
             command.Operation,
             command.Arguments.StrategyId,
             JournalStage.Accepted,
+            baselineTimeWhenStartedPlaying,
+            baselineRunCount,
             null,
             null,
             null,
@@ -128,6 +135,7 @@ internal sealed class RemoteCommandJournal
             if (entry is null ||
                 entry.Version != CommandJournalEntry.CurrentVersion ||
                 entry.CommandId != commandId ||
+                entry.BaselineRunCount < 0 ||
                 entry.UpdatedAtUtc.Offset != TimeSpan.Zero ||
                 !IsCoherent(entry))
             {
