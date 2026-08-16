@@ -16,4 +16,8 @@ public static class ProtocolConstants
                 RemoteOperation.StopSafe,
                 RemoteOperation.SwitchStrategy,
             });
+
+    // ProtocolCodec used this name in R3. Keep it as a source-compatible alias while
+    // R4 expands the advertised capability set without changing protocol version 1.
+    public static IReadOnlyList<RemoteOperation> R3Capabilities => AgentCapabilities;
 }
