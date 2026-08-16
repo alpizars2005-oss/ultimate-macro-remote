@@ -109,7 +109,7 @@ internal static class Program
     private static async Task<int> RunAgentAsync()
     {
         var store = new DpapiEnrollmentStore(DpapiEnrollmentStore.DefaultPath);
-        EnrollmentRecord enrollment = store.Load();
+        EnrollmentRecord enrollment = store.Load(requireFiles: true);
         using var bridge = new RemoteLocalBridge(enrollment.MacroRoot);
         var host = new AgentHost(enrollment, bridge);
         using var cancellation = new CancellationTokenSource();
