@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using UltimateRemoteAgent.Enrollment;
 using UltimateRemoteAgent.Local;
@@ -7,14 +8,29 @@ namespace UltimateRemoteAgent;
 
 internal static class Program
 {
+    [STAThread]
     internal static async Task<int> Main(string[] args)
     {
         try
         {
+            if (args is ["bootstrap", string macroRoot])
+            {
+                NativeConsole.Hide();
+                return await RemoteBootstrap.RunAsync(macroRoot, CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+
+            bool background = args is ["run-background"];
+            if (background)
+            {
+                NativeConsole.Hide();
+            }
+
             using InteractiveUserInstanceLock instanceLock = InteractiveUserInstanceLock.Acquire();
             return args switch
             {
-                ["run"] => await RunAgentAsync().ConfigureAwait(false),
+                ["run"] or ["run-background"] =>
+                    await RunAgentAsync().ConfigureAwait(false),
                 ["pair", string origin, string macroRoot] =>
                     await PairAsync(origin, macroRoot).ConfigureAwait(false),
                 ["inspect", string macroRoot] =>
@@ -151,10 +167,32 @@ internal static class Program
 
     private static int PrintUsage()
     {
-        Console.Error.WriteLine("UltimateRemoteAgent 0.4.0");
-        Console.Error.WriteLine("  UltimateRemoteAgent.exe pair <https-origin> <macro-root>");
+        Console.Error.WriteLine("UltimateRemoteAgent 0.5.0");
+        Console.Error.WriteLine("  UltimateRemoteAgent.exe bootstrap <macro-root>");
         Console.Error.WriteLine("  UltimateRemoteAgent.exe run");
+        Console.Error.WriteLine("  UltimateRemoteAgent.exe pair <https-origin> <macro-root>  (development fallback)");
         Console.Error.WriteLine("  UltimateRemoteAgent.exe inspect <macro-root>");
         return 1;
+    }
+
+    private static class NativeConsole
+    {
+        private const int SwHide = 0;
+
+        internal static void Hide()
+        {
+            nint window = GetConsoleWindow();
+            if (window != 0)
+            {
+                _ = ShowWindow(window, SwHide);
+            }
+        }
+
+        [DllImport("kernel32.dll")]
+        private static extern nint GetConsoleWindow();
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ShowWindow(nint window, int command);
     }
 }
