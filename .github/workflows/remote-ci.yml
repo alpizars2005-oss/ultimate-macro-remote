@@ -48,3 +48,10 @@ jobs:
         run: |
           .\tools\package_remote_preview.ps1 -PublicOrigin https://remote.example -OutputDirectory .\ci-package
           if (-not (Test-Path .\ci-package\Ultimate_Macro_Remote_Preview.zip)) { throw "Client package was not produced." }
+      - name: Upload zero-config client package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ultimate-macro-remote-preview
+          path: .\ci-package\Ultimate_Macro_Remote_Preview.zip
+          if-no-files-found: error
+          retention-days: 7
