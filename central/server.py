@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import ssl
 
 from aiohttp import WSMsgType, web
 
 from .config import RemoteConfig
+from .onboarding import OnboardingError, OnboardingService
 from .pairing import PairingError, PairingService
 from .protocol import (
     CommandUpdateMessage,
@@ -34,6 +36,7 @@ CONFIG_KEY = web.AppKey("remote_config", RemoteConfig)
 SERVICE_KEY = web.AppKey("remote_service", RemoteService)
 STORE_KEY = web.AppKey("remote_store", RemoteStore)
 PAIRING_KEY = web.AppKey("pairing_service", PairingService)
+ONBOARDING_KEY = web.AppKey("onboarding_service", OnboardingService)
 
 
 def create_app(
@@ -42,6 +45,7 @@ def create_app(
     store: RemoteStore | None = None,
     service: RemoteService | None = None,
     pairing_service: PairingService | None = None,
+    onboarding_service: OnboardingService | None = None,
 ) -> web.Application:
     config.validate()
     if service is not None:
@@ -57,14 +61,26 @@ def create_app(
         )
     if pairing_service is not None and pairing_service.store is not remote_store:
         raise ValueError("Injected PairingService and RemoteStore must match.")
+    if onboarding_service is not None and onboarding_service.store is not remote_store:
+        raise ValueError("Injected OnboardingService and RemoteStore must match.")
     pairing = pairing_service or PairingService(remote_store)
     app = web.Application(client_max_size=MAX_MESSAGE_BYTES)
     app[CONFIG_KEY] = config
     app[STORE_KEY] = remote_store
     app[SERVICE_KEY] = remote_service
     app[PAIRING_KEY] = pairing
+    if onboarding_service is not None:
+        app[ONBOARDING_KEY] = onboarding_service
     app.router.add_get("/healthz", _health)
     app.router.add_post("/remote/v1/pair", _redeem_pairing_ticket)
+    if onboarding_service is not None:
+        app.router.add_post("/remote/v1/onboarding/begin", _onboarding_begin)
+        app.router.add_post("/remote/v1/onboarding/status", _onboarding_status)
+        app.router.add_post("/remote/v1/onboarding/complete", _onboarding_complete)
+        app.router.add_get(
+            "/remote/v1/onboarding/discord/callback",
+            _onboarding_discord_callback,
+        )
     app.router.add_get("/remote/v1/agent", _agent_websocket)
     app.on_cleanup.append(_cleanup)
     return app
@@ -115,6 +131,178 @@ async def _redeem_pairing_ticket(request: web.Request) -> web.Response:
         status=201,
         headers=_no_store_headers(),
     )
+
+
+async def _onboarding_begin(request: web.Request) -> web.Response:
+    if request.can_read_body or request.query_string:
+        return _onboarding_error_response(
+            OnboardingError(
+                "ONBOARDING_REQUEST_INVALID",
+                "Remote setup request was invalid.",
+                http_status=400,
+            ),
+            force_close=request.can_read_body,
+        )
+    secret = _onboarding_credential(request)
+    if secret is None:
+        return _onboarding_unauthorized()
+    try:
+        started = await request.app[ONBOARDING_KEY].begin(
+            secret,
+            peer_source=_peer_source(request),
+        )
+    except OnboardingError as exc:
+        return _onboarding_error_response(exc)
+    return web.json_response(
+        {
+            "protocol": PROTOCOL_VERSION,
+            "authorization_url": started.authorization_url,
+            "expires_at": started.expires_at,
+        },
+        status=201,
+        headers=_no_store_headers(),
+    )
+
+
+async def _onboarding_status(request: web.Request) -> web.Response:
+    if request.can_read_body or request.query_string:
+        return _onboarding_error_response(
+            OnboardingError(
+                "ONBOARDING_REQUEST_INVALID",
+                "Remote setup request was invalid.",
+                http_status=400,
+            ),
+            force_close=request.can_read_body,
+        )
+    secret = _onboarding_credential(request)
+    if secret is None:
+        return _onboarding_unauthorized()
+    try:
+        ready = await request.app[ONBOARDING_KEY].poll(secret)
+    except OnboardingError as exc:
+        return _onboarding_error_response(exc)
+    if ready is None:
+        return web.json_response(
+            {"protocol": PROTOCOL_VERSION, "status": "pending"},
+            status=202,
+            headers=_no_store_headers(),
+        )
+    return web.json_response(
+        {
+            "protocol": PROTOCOL_VERSION,
+            "status": "ready",
+            "device_credential": ready.device_credential,
+            "agent_websocket_path": "/remote/v1/agent",
+        },
+        status=201,
+        headers=_no_store_headers(),
+    )
+
+
+async def _onboarding_complete(request: web.Request) -> web.Response:
+    if request.can_read_body or request.query_string:
+        return _onboarding_error_response(
+            OnboardingError(
+                "ONBOARDING_REQUEST_INVALID",
+                "Remote setup request was invalid.",
+                http_status=400,
+            ),
+            force_close=request.can_read_body,
+        )
+    secret = _onboarding_credential(request)
+    if secret is None:
+        return _onboarding_unauthorized()
+    try:
+        await request.app[ONBOARDING_KEY].complete(secret)
+    except OnboardingError as exc:
+        return _onboarding_error_response(exc)
+    return web.Response(status=204, headers=_no_store_headers())
+
+
+async def _onboarding_discord_callback(request: web.Request) -> web.Response:
+    service = request.app[ONBOARDING_KEY]
+    state = request.query.get("state", "")
+    oauth_error = request.query.get("error", "")
+    code = request.query.get("code", "")
+    if oauth_error:
+        await service.deny_callback(state=state)
+        return _onboarding_browser_page(
+            "Remote setup not authorized",
+            "Discord authorization was declined. You can close this tab and return to Ultimate Macro.",
+            success=False,
+        )
+    try:
+        await service.authorize_callback(state=state, code=code)
+    except OnboardingError as exc:
+        return _onboarding_browser_page(
+            "Remote setup could not be completed",
+            exc.user_message,
+            success=False,
+            status=exc.http_status,
+        )
+    return _onboarding_browser_page(
+        "Discord connected",
+        "Ultimate Macro Remote is linked. You can close this tab and return to the macro.",
+        success=True,
+    )
+
+
+def _onboarding_browser_page(
+    title: str,
+    message: str,
+    *,
+    success: bool,
+    status: int = 200,
+) -> web.Response:
+    safe_title = html.escape(title, quote=True)
+    safe_message = html.escape(message, quote=True)
+    accent = "#3ba55d" if success else "#ed4245"
+    body = (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        f"<title>{safe_title}</title>"
+        "<style>body{font-family:system-ui,sans-serif;background:#111827;color:#f9fafb;"
+        "display:grid;place-items:center;min-height:100vh;margin:0}main{max-width:34rem;"
+        "padding:2rem;border:1px solid #374151;border-radius:1rem;background:#1f2937}"
+        f"h1{{color:{accent};margin-top:0}}p{{line-height:1.55}}</style></head>"
+        f"<body><main><h1>{safe_title}</h1><p>{safe_message}</p></main></body></html>"
+    )
+    return web.Response(
+        text=body,
+        content_type="text/html",
+        status=status,
+        headers=_no_store_headers(),
+    )
+
+
+def _onboarding_unauthorized() -> web.Response:
+    response = web.json_response(
+        {
+            "error": {
+                "code": "ONBOARDING_AUTH_REQUIRED",
+                "message": "Remote setup authentication is required.",
+            }
+        },
+        status=401,
+        headers=_no_store_headers(),
+    )
+    response.headers["WWW-Authenticate"] = "Onboarding"
+    return response
+
+
+def _onboarding_error_response(
+    exc: OnboardingError,
+    *,
+    force_close: bool = False,
+) -> web.Response:
+    response = web.json_response(
+        {"error": {"code": exc.code, "message": exc.user_message}},
+        status=exc.http_status,
+        headers=_no_store_headers(),
+    )
+    if force_close:
+        response.force_close()
+    return response
 
 
 async def _agent_websocket(request: web.Request) -> web.StreamResponse:
@@ -194,21 +382,28 @@ def _parse_text_message(message: object):
 
 
 def _bearer_credential(request: web.Request) -> str | None:
-    header = request.headers.get("Authorization", "")
-    if not header.startswith("Bearer ") or header.count(" ") != 1:
-        return None
-    credential = header[7:]
-    if not credential or len(credential) > 160:
-        return None
-    return credential
+    return _authorization_credential(request, "Bearer", 160)
 
 
 def _pairing_credential(request: web.Request) -> str | None:
+    return _authorization_credential(request, "Pairing", 96)
+
+
+def _onboarding_credential(request: web.Request) -> str | None:
+    return _authorization_credential(request, "Onboarding", 96)
+
+
+def _authorization_credential(
+    request: web.Request,
+    scheme: str,
+    maximum_length: int,
+) -> str | None:
     header = request.headers.get("Authorization", "")
-    if not header.startswith("Pairing ") or header.count(" ") != 1:
+    prefix = f"{scheme} "
+    if not header.startswith(prefix) or header.count(" ") != 1:
         return None
-    credential = header[8:]
-    if not credential or len(credential) > 96:
+    credential = header[len(prefix) :]
+    if not credential or len(credential) > maximum_length:
         return None
     return credential
 
