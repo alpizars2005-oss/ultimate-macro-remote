@@ -223,48 +223,58 @@ internal sealed class RemoteLocalBridge : IRemoteLocalBridge, IDisposable
             throw new LocalMutationException("RECONCILIATION_NOT_EXECUTED");
         }
 
-        BridgeStateData bridge = _bridgeState.ReadOrDefault();
-        if (bridge.LastCommandId != reconciliation.CommandId)
+        // EXECUTING means the side effect may already have been placed in the local
+        // mailbox. Never replay it. Wait only for the existing AHK command/evidence.
+        TimeSpan evidenceWindow = reconciliation.Operation is RemoteOperation.StartStrategy
+            ? StartConfirmationTimeout
+            : SafeBoundaryTimeout;
+        DateTimeOffset deadline = DateTimeOffset.UtcNow + evidenceWindow;
+        while (DateTimeOffset.UtcNow < deadline)
         {
-            TryMarkFailed(entry, "RECONCILIATION_INDETERMINATE");
-            throw new LocalMutationException("RECONCILIATION_INDETERMINATE");
+            cancellationToken.ThrowIfCancellationRequested();
+            BridgeStateData bridge = _bridgeState.ReadOrDefault();
+            if (bridge.LastCommandId == reconciliation.CommandId)
+            {
+                if (string.Equals(bridge.LastResult, "error", StringComparison.OrdinalIgnoreCase))
+                {
+                    TryMarkFailed(entry, "MACRO_BRIDGE_REJECTED");
+                    throw new LocalMutationException("MACRO_BRIDGE_REJECTED");
+                }
+
+                MacroSnapshot snapshot = await GetSnapshotAsync(cancellationToken).ConfigureAwait(false);
+                LocalActionOutcome? outcome = reconciliation.Operation switch
+                {
+                    RemoteOperation.StartStrategy when
+                        string.Equals(bridge.LastResult, "start_accepted", StringComparison.OrdinalIgnoreCase) &&
+                        HasNewStartEvidence(entry, bridge) &&
+                        IsRunningTarget(snapshot, entry.StrategyId, requireRoblox: true) =>
+                            new LocalActionOutcome(ActionResult.StrategyStarted, snapshot),
+
+                    RemoteOperation.StopSafe when
+                        string.Equals(bridge.LastResult, "stopped_safe", StringComparison.OrdinalIgnoreCase) &&
+                        snapshot.MacroState is MacroState.NotRunning or MacroState.Idle =>
+                            new LocalActionOutcome(ActionResult.StoppedSafe, snapshot),
+
+                    RemoteOperation.SwitchStrategy when
+                        string.Equals(bridge.LastResult, "switched_safe", StringComparison.OrdinalIgnoreCase) &&
+                        IsRunningTarget(snapshot, entry.StrategyId, requireRoblox: false) =>
+                            new LocalActionOutcome(ActionResult.SwitchedSafe, snapshot),
+
+                    _ => null,
+                };
+
+                if (outcome is not null)
+                {
+                    _journal.MarkCompleted(entry, outcome.ActionResult, outcome.Snapshot);
+                    return outcome;
+                }
+            }
+
+            await Task.Delay(ActivePollInterval, cancellationToken).ConfigureAwait(false);
         }
-        if (string.Equals(bridge.LastResult, "error", StringComparison.OrdinalIgnoreCase))
-        {
-            TryMarkFailed(entry, "MACRO_BRIDGE_REJECTED");
-            throw new LocalMutationException("MACRO_BRIDGE_REJECTED");
-        }
 
-        MacroSnapshot snapshot = await GetSnapshotAsync(cancellationToken).ConfigureAwait(false);
-        LocalActionOutcome? outcome = reconciliation.Operation switch
-        {
-            RemoteOperation.StartStrategy when
-                string.Equals(bridge.LastResult, "start_accepted", StringComparison.OrdinalIgnoreCase) &&
-                HasNewStartEvidence(entry, bridge) &&
-                IsRunningTarget(snapshot, entry.StrategyId, requireRoblox: true) =>
-                    new LocalActionOutcome(ActionResult.StrategyStarted, snapshot),
-
-            RemoteOperation.StopSafe when
-                string.Equals(bridge.LastResult, "stopped_safe", StringComparison.OrdinalIgnoreCase) &&
-                snapshot.MacroState is MacroState.NotRunning or MacroState.Idle =>
-                    new LocalActionOutcome(ActionResult.StoppedSafe, snapshot),
-
-            RemoteOperation.SwitchStrategy when
-                string.Equals(bridge.LastResult, "switched_safe", StringComparison.OrdinalIgnoreCase) &&
-                IsRunningTarget(snapshot, entry.StrategyId, requireRoblox: false) =>
-                    new LocalActionOutcome(ActionResult.SwitchedSafe, snapshot),
-
-            _ => null,
-        };
-
-        if (outcome is null)
-        {
-            TryMarkFailed(entry, "RECONCILIATION_INDETERMINATE");
-            throw new LocalMutationException("RECONCILIATION_INDETERMINATE");
-        }
-
-        _journal.MarkCompleted(entry, outcome.ActionResult, outcome.Snapshot);
-        return outcome;
+        TryMarkFailed(entry, "RECONCILIATION_INDETERMINATE");
+        throw new LocalMutationException("RECONCILIATION_INDETERMINATE");
     }
 
     public void Dispose()
@@ -487,7 +497,12 @@ internal sealed class RemoteMailbox
             builder.Append("Strategy=").AppendLine(canonicalStrategyPath);
         }
 
-        byte[] payload = new UnicodeEncoding(false, true, true).GetBytes(builder.ToString());
+        var encoding = new UnicodeEncoding(false, true, true);
+        byte[] body = encoding.GetBytes(builder.ToString());
+        byte[] preamble = encoding.GetPreamble();
+        byte[] payload = new byte[preamble.Length + body.Length];
+        Buffer.BlockCopy(preamble, 0, payload, 0, preamble.Length);
+        Buffer.BlockCopy(body, 0, payload, preamble.Length, body.Length);
         if (payload.Length > MaximumMailboxBytes)
         {
             throw new LocalMutationException("MAILBOX_INVALID");
