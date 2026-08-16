@@ -60,7 +60,7 @@ internal sealed class DpapiEnrollmentStore
         "UltimateRemoteAgent",
         "enrollment.v1.bin");
 
-    internal EnrollmentRecord Load()
+    internal EnrollmentRecord Load(bool requireFiles = true)
     {
         byte[] protectedBytes;
         try
@@ -98,7 +98,12 @@ internal sealed class DpapiEnrollmentStore
 
         try
         {
-            return EnrollmentValidator.Validate(ParseEnvelope(plaintext), requireFiles: true);
+            // Normal Agent startup requires the enrolled installation to exist. The
+            // one-time bootstrap may opt out of that file check only so it can rebind
+            // an already-authenticated DPAPI envelope after the user moves/re-extracts
+            // the macro. All origin, credential, path-kind, and version validation is
+            // still applied, and Save() always requires a fully valid new installation.
+            return EnrollmentValidator.Validate(ParseEnvelope(plaintext), requireFiles);
         }
         finally
         {
