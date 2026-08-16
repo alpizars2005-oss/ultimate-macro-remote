@@ -43,11 +43,24 @@ jobs:
       - name: Publish self-contained Agent
         shell: pwsh
         run: dotnet publish .\UltimateRemoteAgent\src\UltimateRemoteAgent\UltimateRemoteAgent.csproj -c Release -p:PublishProfile=win-x64
-      - name: Smoke-build zero-config client package
+      - name: Smoke-build same-origin zero-config client package
         shell: pwsh
         run: |
-          .\tools\package_remote_preview.ps1 -PublicOrigin https://remote.example -OutputDirectory .\ci-package
+          Set-Content -LiteralPath .\.env -Value "ULTIMATE_REMOTE_PUBLIC_HTTPS_ORIGIN=https://remote.example" -Encoding utf8NoBOM
+          .\tools\package_remote_preview.ps1 -OutputDirectory .\ci-package
+          Remove-Item -LiteralPath .\.env -Force
           if (-not (Test-Path .\ci-package\Ultimate_Macro_Remote_Preview.zip)) { throw "Client package was not produced." }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path .\ci-package\Ultimate_Macro_Remote_Preview.zip))
+          try {
+            $entry = $zip.Entries | Where-Object { $_.FullName -eq "Ultimate_Macro_Remote/remote_service.url" }
+            if ($null -eq $entry) { throw "remote_service.url is missing from client package." }
+            $reader = [IO.StreamReader]::new($entry.Open())
+            try { $embedded = $reader.ReadToEnd().Trim() } finally { $reader.Dispose() }
+            if ($embedded -ne "https://remote.example") { throw "Client package origin did not match central .env origin." }
+          } finally {
+            $zip.Dispose()
+          }
       - name: Upload zero-config client package
         uses: actions/upload-artifact@v4
         with:
