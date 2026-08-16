@@ -9,8 +9,8 @@ public sealed class ProtocolCodecTests
 {
     private static readonly Guid CommandId =
         Guid.Parse("11111111-1111-4111-8111-111111111111");
-    private static readonly string[] R3OperationNames =
-        ["GET_STATUS", "LIST_STRATEGIES"];
+    private static readonly string[] AgentOperationNames =
+        ["GET_STATUS", "LIST_STRATEGIES", "START_STRATEGY", "STOP_SAFE", "SWITCH_STRATEGY"];
 
     [TestMethod]
     public void ParseWelcomeUsesClosedSchemaAndReturnsReconciliationMetadataOnly()
@@ -138,10 +138,10 @@ public sealed class ProtocolCodecTests
     }
 
     [TestMethod]
-    public void EncodeHelloAdvertisesOnlyR3ReadCapabilities()
+    public void EncodeHelloAdvertisesTheFiveR4Capabilities()
     {
         byte[] encoded = ProtocolCodec.EncodeHello(
-            "0.3.0",
+            "0.4.0",
             new MacroSnapshot(MacroState.Idle, false, null));
         using JsonDocument document = JsonDocument.Parse(encoded);
         JsonElement root = document.RootElement;
@@ -150,7 +150,7 @@ public sealed class ProtocolCodecTests
             .Select(item => item.GetString()!)
             .ToArray();
 
-        CollectionAssert.AreEqual(R3OperationNames, operations);
+        CollectionAssert.AreEqual(AgentOperationNames, operations);
         Assert.AreEqual(1, root.GetProperty("protocol").GetInt32());
         Assert.AreEqual("HELLO", root.GetProperty("type").GetString());
         Assert.AreEqual(JsonValueKind.Null, root.GetProperty("snapshot").GetProperty("current_strategy_id").ValueKind);
@@ -179,6 +179,17 @@ public sealed class ProtocolCodecTests
             "command_id",
             "status",
             "strategies");
+        AssertProperties(
+            ProtocolCodec.EncodeCompletedAction(
+                CommandId,
+                new MacroSnapshot(MacroState.Running, true, "strategy_alpha_01"),
+                ActionResult.StrategyStarted),
+            "protocol",
+            "type",
+            "command_id",
+            "status",
+            "snapshot",
+            "action_result");
         AssertProperties(
             ProtocolCodec.EncodeFailed(
                 CommandId,
