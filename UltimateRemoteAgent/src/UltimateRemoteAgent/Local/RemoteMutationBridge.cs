@@ -170,15 +170,10 @@ internal sealed class RemoteLocalBridge : IRemoteLocalBridge, IDisposable
         }
         catch (OperationCanceledException)
         {
-            // Keep EXECUTING. The side effect may already exist; reconnect uses only
-            // durable local evidence and never replays the mutation.
             throw;
         }
         catch (LocalMutationException exception)
         {
-            // Execute* methods only throw LocalMutationException after a mutation has
-            // been proven not to exist, or after AHK has explicitly consumed/rejected
-            // it. Ambiguous post-mailbox conditions stay in the evidence loop instead.
             TryMarkFailed(journal, exception.Code);
             throw;
         }
@@ -220,17 +215,10 @@ internal sealed class RemoteLocalBridge : IRemoteLocalBridge, IDisposable
         }
         if (entry.Stage is JournalStage.Accepted)
         {
-            // ACCEPTED is persisted before the Agent reports acceptance, while the
-            // side effect is placed only after EXECUTING. Therefore this state proves
-            // that nothing was executed locally.
             TryMarkFailed(entry, "RECONCILIATION_NOT_EXECUTED");
             throw new LocalMutationException("RECONCILIATION_NOT_EXECUTED");
         }
 
-        // EXECUTING is deliberately conservative: the mailbox may already have been
-        // written. There is no wall-clock timeout that can turn an uncertain mutation
-        // into a failure. Keep heartbeats alive and wait for local AHK evidence or
-        // cancellation; a later reconnect resumes this same evidence-only loop.
         while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -313,18 +301,16 @@ internal sealed class RemoteLocalBridge : IRemoteLocalBridge, IDisposable
         }
         catch
         {
-            if (!_mailbox.TryRemoveIfOwned(prepared.Command.CommandId))
+            if (_mailbox.TryRemoveIfOwned(prepared.Command.CommandId))
             {
-                // The command may still be waiting for a future Remote macro startup.
-                // Never report it failed or replay it; remain EXECUTING until the
-                // connection is cancelled and reconciliation can inspect evidence.
-                await WaitForStartEvidenceAsync(
-                    prepared.Command.CommandId,
-                    targetId,
-                    journal,
-                    cancellationToken).ConfigureAwait(false);
+                throw;
             }
-            throw;
+
+            return await WaitForStartEvidenceAsync(
+                prepared.Command.CommandId,
+                targetId,
+                journal,
+                cancellationToken).ConfigureAwait(false);
         }
 
         return await WaitForStartEvidenceAsync(
