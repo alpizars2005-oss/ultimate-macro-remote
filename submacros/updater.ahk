@@ -17,7 +17,10 @@ RemoteBootstrapIfPackaged() {
         return
 
     try {
-        Run('"' agentExe '" bootstrap "' A_ScriptDir '"', A_ScriptDir, "Hide")
+        ; bootstrap hides its console itself. Do not use the Run "Hide" option here,
+        ; because Windows may also apply that startup visibility to the one-time
+        ; consent form we intentionally need the user to see.
+        Run('"' agentExe '" bootstrap "' A_ScriptDir '"', A_ScriptDir)
     } catch {
         ; Remote setup must never prevent the normal macro UI from starting.
     }
