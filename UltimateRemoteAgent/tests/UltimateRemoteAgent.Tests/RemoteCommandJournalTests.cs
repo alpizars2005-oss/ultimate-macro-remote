@@ -1,3 +1,4 @@
+using System.Globalization;
 using UltimateRemoteAgent.Local;
 using UltimateRemoteAgent.Protocol;
 
@@ -19,8 +20,12 @@ public sealed class RemoteCommandJournalTests
             var command = new CommandMessage(
                 id,
                 RemoteOperation.StartStrategy,
-                DateTimeOffset.Parse("2026-08-15T18:00:00+00:00"),
-                DateTimeOffset.Parse("2026-08-15T18:00:30+00:00"),
+                DateTimeOffset.Parse(
+                    "2026-08-15T18:00:00+00:00",
+                    CultureInfo.InvariantCulture),
+                DateTimeOffset.Parse(
+                    "2026-08-15T18:00:30+00:00",
+                    CultureInfo.InvariantCulture),
                 new CommandArguments("strategy_alpha_01"));
 
             CommandJournalEntry accepted = journal.CreateAccepted(command, 123U, 7L);
