@@ -19,6 +19,18 @@ internal sealed record RemotePreferences(
 internal sealed class RemotePreferencesStore
 {
     private const int MaximumBytes = 16 * 1024;
+    private static readonly JsonSerializerOptions ReadOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+        AllowTrailingCommas = false,
+        ReadCommentHandling = JsonCommentHandling.Disallow,
+        MaxDepth = 8,
+    };
+    private static readonly JsonSerializerOptions WriteOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
+        WriteIndented = false,
+    };
     private readonly string _path;
 
     internal RemotePreferencesStore(string? path = null) =>
@@ -43,13 +55,7 @@ internal sealed class RemotePreferencesStore
             byte[] payload = File.ReadAllBytes(_path);
             RemotePreferences? preferences = JsonSerializer.Deserialize<RemotePreferences>(
                 payload,
-                new JsonSerializerOptions
-                {
-                    PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
-                    AllowTrailingCommas = false,
-                    ReadCommentHandling = JsonCommentHandling.Disallow,
-                    MaxDepth = 8,
-                });
+                ReadOptions);
             if (preferences is null ||
                 preferences.Version != RemotePreferences.CurrentVersion ||
                 string.IsNullOrWhiteSpace(preferences.TermsVersion) ||
@@ -85,13 +91,7 @@ internal sealed class RemotePreferencesStore
             string temporary = Path.Combine(
                 directory,
                 $".{Path.GetFileName(_path)}.{Guid.NewGuid():N}.tmp");
-            byte[] payload = JsonSerializer.SerializeToUtf8Bytes(
-                preferences,
-                new JsonSerializerOptions
-                {
-                    PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower,
-                    WriteIndented = false,
-                });
+            byte[] payload = JsonSerializer.SerializeToUtf8Bytes(preferences, WriteOptions);
             if (payload.Length > MaximumBytes)
             {
                 throw new AgentRuntimeException("PREFERENCES_INVALID");
@@ -171,7 +171,7 @@ internal static class RemoteConsentDialog
         {
             Text = "Enable Remote Control?",
             AutoSize = true,
-            Font = new Font(SystemFonts.MessageBoxFont.FontFamily, 16, FontStyle.Bold),
+            Font = new Font("Segoe UI", 16, FontStyle.Bold),
             Left = 24,
             Top = 20,
         };
@@ -340,7 +340,9 @@ internal static class RemoteBootstrap
             preferencesStore.Save(preferences);
         }
 
-        if (!preferences.RemoteEnabled)
+        RemotePreferences resolvedPreferences = preferences
+            ?? throw new AgentRuntimeException("PREFERENCES_INVALID");
+        if (!resolvedPreferences.RemoteEnabled)
         {
             RemoteStartupRegistration.Apply(enabled: false);
             return 0;
@@ -359,7 +361,7 @@ internal static class RemoteBootstrap
                 cancellationToken).ConfigureAwait(false);
         }
 
-        RemoteStartupRegistration.Apply(preferences.StartWithWindows);
+        RemoteStartupRegistration.Apply(resolvedPreferences.StartWithWindows);
         StartBackgroundAgent();
         SafeLog.Info("REMOTE_BOOTSTRAP_COMPLETE");
         return 0;
@@ -410,8 +412,6 @@ internal static class RemoteBootstrap
                         ready.DeviceCredential);
                     store.Save(enrollment);
 
-                    // The server revokes unacknowledged credentials after setup expiry,
-                    // so retry completion while this one-time setup secret is valid.
                     await CompleteWithRetryAsync(
                         client,
                         origin,
