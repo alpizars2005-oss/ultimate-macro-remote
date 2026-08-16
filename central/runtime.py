@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -11,6 +12,7 @@ from dotenv import load_dotenv
 
 from .config import RemoteConfig
 from .discord_bot import DiscordBotOptions, RemoteDiscordClient
+from .onboarding import OnboardingOptions, OnboardingService
 from .pairing import PairingOptions, PairingService
 from .server import build_ssl_context, create_app
 from .service import RemoteService
@@ -26,6 +28,7 @@ class RuntimeComponents:
     store: RemoteStore
     service: RemoteService
     pairing: PairingService
+    onboarding: OnboardingService | None
     app: web.Application
     discord_client: RemoteDiscordClient
 
@@ -34,6 +37,7 @@ def create_runtime_components(
     remote_config: RemoteConfig,
     discord_options: DiscordBotOptions,
     pairing_options: PairingOptions,
+    onboarding_options: OnboardingOptions | None = None,
     *,
     client_factory: Callable[
         [RemoteService, PairingService, DiscordBotOptions], RemoteDiscordClient
@@ -42,6 +46,8 @@ def create_runtime_components(
     remote_config.validate()
     discord_options.validate()
     pairing_options.validate()
+    if onboarding_options is not None:
+        onboarding_options.validate()
     store = RemoteStore(remote_config.database_path)
     try:
         service = RemoteService(
@@ -49,28 +55,38 @@ def create_runtime_components(
             command_delivery_ttl_seconds=remote_config.command_delivery_ttl_seconds,
         )
         pairing = PairingService(store, pairing_options)
+        onboarding = (
+            OnboardingService(store, onboarding_options)
+            if onboarding_options is not None and onboarding_options.enabled
+            else None
+        )
         app = create_app(
             remote_config,
             store=store,
             service=service,
             pairing_service=pairing,
+            onboarding_service=onboarding,
         )
         client = client_factory(service, pairing, discord_options)
     except Exception:
         store.close()
         raise
-    return RuntimeComponents(store, service, pairing, app, client)
+    return RuntimeComponents(store, service, pairing, onboarding, app, client)
 
 
 async def run_runtime(
     remote_config: RemoteConfig,
     discord_options: DiscordBotOptions,
     pairing_options: PairingOptions,
+    onboarding_options: OnboardingOptions | None = None,
 ) -> None:
     if not discord_options.token:
         raise RuntimeError("DISCORD_TOKEN is required on the central server.")
     components = create_runtime_components(
-        remote_config, discord_options, pairing_options
+        remote_config,
+        discord_options,
+        pairing_options,
+        onboarding_options,
     )
     runner = web.AppRunner(components.app, access_log=None)
     runner_ready = False
@@ -101,6 +117,28 @@ async def run_runtime(
                 components.store.close()
 
 
+def _onboarding_options_from_environment() -> OnboardingOptions:
+    return OnboardingOptions(
+        client_id=os.getenv("DISCORD_CLIENT_ID", "").strip(),
+        client_secret=os.getenv("DISCORD_CLIENT_SECRET", "").strip(),
+        public_https_origin=os.getenv(
+            "ULTIMATE_REMOTE_PUBLIC_HTTPS_ORIGIN", ""
+        ).strip(),
+        session_ttl_seconds=int(
+            os.getenv("ULTIMATE_REMOTE_ONBOARDING_TTL_SECONDS", "600")
+        ),
+        source_begin_limit=int(
+            os.getenv("ULTIMATE_REMOTE_ONBOARDING_SOURCE_LIMIT", "20")
+        ),
+        global_begin_limit=int(
+            os.getenv("ULTIMATE_REMOTE_ONBOARDING_GLOBAL_LIMIT", "200")
+        ),
+        rate_window_seconds=int(
+            os.getenv("ULTIMATE_REMOTE_ONBOARDING_WINDOW_SECONDS", "600")
+        ),
+    )
+
+
 def main() -> None:
     load_dotenv(PROJECT_ROOT / ".env")
     logging.basicConfig(
@@ -110,9 +148,16 @@ def main() -> None:
     remote_config = RemoteConfig.from_environment()
     discord_options = DiscordBotOptions.from_environment()
     pairing_options = PairingOptions.from_environment()
+    onboarding_options = _onboarding_options_from_environment()
+    onboarding_options.validate()
     try:
         asyncio.run(
-            run_runtime(remote_config, discord_options, pairing_options)
+            run_runtime(
+                remote_config,
+                discord_options,
+                pairing_options,
+                onboarding_options,
+            )
         )
     except KeyboardInterrupt:
         pass
