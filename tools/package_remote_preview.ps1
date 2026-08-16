@@ -1,7 +1,6 @@
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)]
-    [string]$PublicOrigin,
+    [string]$PublicOrigin = "",
 
     [string]$AgentExe = (Join-Path $PSScriptRoot "..\UltimateRemoteAgent\src\UltimateRemoteAgent\bin\Release\net10.0-windows\win-x64\publish\UltimateRemoteAgent.exe"),
 
@@ -12,6 +11,24 @@ $ErrorActionPreference = "Stop"
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $agentPath = [IO.Path]::GetFullPath($AgentExe)
 $outputRoot = [IO.Path]::GetFullPath($OutputDirectory)
+
+if ([string]::IsNullOrWhiteSpace($PublicOrigin)) {
+    $envPath = Join-Path $repoRoot ".env"
+    if (-not (Test-Path -LiteralPath $envPath -PathType Leaf)) {
+        throw "PublicOrigin was not supplied and .env was not found. Pass -PublicOrigin or configure ULTIMATE_REMOTE_PUBLIC_HTTPS_ORIGIN in .env."
+    }
+    $originLine = Get-Content -LiteralPath $envPath | Where-Object {
+        $_ -match '^\s*ULTIMATE_REMOTE_PUBLIC_HTTPS_ORIGIN\s*='
+    } | Select-Object -Last 1
+    if ($null -eq $originLine) {
+        throw "ULTIMATE_REMOTE_PUBLIC_HTTPS_ORIGIN is missing from .env."
+    }
+    $PublicOrigin = (($originLine -split '=', 2)[1]).Trim().Trim('"').Trim("'")
+    if ([string]::IsNullOrWhiteSpace($PublicOrigin)) {
+        throw "ULTIMATE_REMOTE_PUBLIC_HTTPS_ORIGIN is blank in .env."
+    }
+    Write-Host "Using ULTIMATE_REMOTE_PUBLIC_HTTPS_ORIGIN from .env."
+}
 
 try {
     $origin = [Uri]$PublicOrigin
@@ -72,6 +89,8 @@ try {
     @"
 Ultimate Macro Remote — Development Preview
 
+Service origin: $canonicalOrigin
+
 1. Extract this ZIP to a normal local folder.
 2. Run Main_Remote.ahk normally.
 3. On first run only, review the Remote Terms/Privacy notice and choose Connect Discord.
@@ -79,6 +98,8 @@ Ultimate Macro Remote — Development Preview
 5. If Start with Windows is enabled, only the Remote Agent waits in the background. It does not start Roblox or a strategy by itself.
 
 Remote is optional. If declined, Ultimate Macro continues normally.
+
+Development note: if a Cloudflare Quick Tunnel URL changes, rebuild this ZIP from the same updated .env origin before using it on another client.
 "@ | Set-Content -LiteralPath (Join-Path $staging "REMOTE_README.txt") -Encoding utf8NoBOM
 
     # Packaging must never leak central/server secrets even if the developer has an
@@ -104,6 +125,7 @@ Remote is optional. If declined, Ultimate Macro continues normally.
     }
     Compress-Archive -LiteralPath $staging -DestinationPath $zipPath -CompressionLevel Optimal
     Write-Host "Created: $zipPath"
+    Write-Host "Embedded service origin: $canonicalOrigin"
 } finally {
     if (Test-Path -LiteralPath $stagingParent) {
         Remove-Item -LiteralPath $stagingParent -Recurse -Force
