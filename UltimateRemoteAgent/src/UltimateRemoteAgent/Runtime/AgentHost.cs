@@ -9,7 +9,7 @@ namespace UltimateRemoteAgent.Runtime;
 
 internal sealed class AgentHost
 {
-    private const string AgentVersion = "0.4.0";
+    private const string AgentVersion = "0.5.0";
     private readonly EnrollmentRecord _enrollment;
     private readonly IRemoteLocalBridge _bridge;
     private readonly FullJitterReconnectPolicy _reconnectPolicy;
