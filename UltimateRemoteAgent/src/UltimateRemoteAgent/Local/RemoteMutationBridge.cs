@@ -32,8 +32,6 @@ internal interface IRemoteLocalBridge : IReadOnlyLocalBridge
 internal sealed class RemoteLocalBridge : IRemoteLocalBridge, IDisposable
 {
     private static readonly TimeSpan ActivePollInterval = TimeSpan.FromSeconds(1);
-    private static readonly TimeSpan StartConfirmationTimeout = TimeSpan.FromMinutes(10);
-    private static readonly TimeSpan SafeBoundaryTimeout = TimeSpan.FromMinutes(90);
 
     private readonly string _macroRoot;
     private readonly string _macroExecutable;
@@ -172,12 +170,15 @@ internal sealed class RemoteLocalBridge : IRemoteLocalBridge, IDisposable
         }
         catch (OperationCanceledException)
         {
-            // Keep the durable journal at EXECUTING. On reconnect the Agent reconciles
-            // evidence and never replays the side effect.
+            // Keep EXECUTING. The side effect may already exist; reconnect uses only
+            // durable local evidence and never replays the mutation.
             throw;
         }
         catch (LocalMutationException exception)
         {
+            // Execute* methods only throw LocalMutationException after a mutation has
+            // been proven not to exist, or after AHK has explicitly consumed/rejected
+            // it. Ambiguous post-mailbox conditions stay in the evidence loop instead.
             TryMarkFailed(journal, exception.Code);
             throw;
         }
@@ -219,21 +220,22 @@ internal sealed class RemoteLocalBridge : IRemoteLocalBridge, IDisposable
         }
         if (entry.Stage is JournalStage.Accepted)
         {
+            // ACCEPTED is persisted before the Agent reports acceptance, while the
+            // side effect is placed only after EXECUTING. Therefore this state proves
+            // that nothing was executed locally.
             TryMarkFailed(entry, "RECONCILIATION_NOT_EXECUTED");
             throw new LocalMutationException("RECONCILIATION_NOT_EXECUTED");
         }
 
-        // EXECUTING means the side effect may already have been placed in the local
-        // mailbox. Never replay it. Wait only for the existing AHK command/evidence.
-        TimeSpan evidenceWindow = reconciliation.Operation is RemoteOperation.StartStrategy
-            ? StartConfirmationTimeout
-            : SafeBoundaryTimeout;
-        DateTimeOffset deadline = DateTimeOffset.UtcNow + evidenceWindow;
-        while (DateTimeOffset.UtcNow < deadline)
+        // EXECUTING is deliberately conservative: the mailbox may already have been
+        // written. There is no wall-clock timeout that can turn an uncertain mutation
+        // into a failure. Keep heartbeats alive and wait for local AHK evidence or
+        // cancellation; a later reconnect resumes this same evidence-only loop.
+        while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            BridgeStateData bridge = _bridgeState.ReadOrDefault();
-            if (bridge.LastCommandId == reconciliation.CommandId)
+            BridgeStateData? bridge = TryReadBridgeState();
+            if (bridge is not null && bridge.LastCommandId == reconciliation.CommandId)
             {
                 if (string.Equals(bridge.LastResult, "error", StringComparison.OrdinalIgnoreCase))
                 {
@@ -241,40 +243,40 @@ internal sealed class RemoteLocalBridge : IRemoteLocalBridge, IDisposable
                     throw new LocalMutationException("MACRO_BRIDGE_REJECTED");
                 }
 
-                MacroSnapshot snapshot = await GetSnapshotAsync(cancellationToken).ConfigureAwait(false);
-                LocalActionOutcome? outcome = reconciliation.Operation switch
+                MacroSnapshot? snapshot = await TryGetSnapshotAsync(cancellationToken).ConfigureAwait(false);
+                if (snapshot is not null)
                 {
-                    RemoteOperation.StartStrategy when
-                        string.Equals(bridge.LastResult, "start_accepted", StringComparison.OrdinalIgnoreCase) &&
-                        HasNewStartEvidence(entry, bridge) &&
-                        IsRunningTarget(snapshot, entry.StrategyId, requireRoblox: true) =>
-                            new LocalActionOutcome(ActionResult.StrategyStarted, snapshot),
+                    LocalActionOutcome? outcome = reconciliation.Operation switch
+                    {
+                        RemoteOperation.StartStrategy when
+                            string.Equals(bridge.LastResult, "start_accepted", StringComparison.OrdinalIgnoreCase) &&
+                            HasNewStartEvidence(entry, bridge) &&
+                            IsRunningTarget(snapshot, entry.StrategyId, requireRoblox: true) =>
+                                new LocalActionOutcome(ActionResult.StrategyStarted, snapshot),
 
-                    RemoteOperation.StopSafe when
-                        string.Equals(bridge.LastResult, "stopped_safe", StringComparison.OrdinalIgnoreCase) &&
-                        snapshot.MacroState is MacroState.NotRunning or MacroState.Idle =>
-                            new LocalActionOutcome(ActionResult.StoppedSafe, snapshot),
+                        RemoteOperation.StopSafe when
+                            string.Equals(bridge.LastResult, "stopped_safe", StringComparison.OrdinalIgnoreCase) &&
+                            snapshot.MacroState is MacroState.NotRunning or MacroState.Idle =>
+                                new LocalActionOutcome(ActionResult.StoppedSafe, snapshot),
 
-                    RemoteOperation.SwitchStrategy when
-                        string.Equals(bridge.LastResult, "switched_safe", StringComparison.OrdinalIgnoreCase) &&
-                        IsRunningTarget(snapshot, entry.StrategyId, requireRoblox: false) =>
-                            new LocalActionOutcome(ActionResult.SwitchedSafe, snapshot),
+                        RemoteOperation.SwitchStrategy when
+                            string.Equals(bridge.LastResult, "switched_safe", StringComparison.OrdinalIgnoreCase) &&
+                            IsRunningTarget(snapshot, entry.StrategyId, requireRoblox: false) =>
+                                new LocalActionOutcome(ActionResult.SwitchedSafe, snapshot),
 
-                    _ => null,
-                };
+                        _ => null,
+                    };
 
-                if (outcome is not null)
-                {
-                    _journal.MarkCompleted(entry, outcome.ActionResult, outcome.Snapshot);
-                    return outcome;
+                    if (outcome is not null)
+                    {
+                        _journal.MarkCompleted(entry, outcome.ActionResult, outcome.Snapshot);
+                        return outcome;
+                    }
                 }
             }
 
             await Task.Delay(ActivePollInterval, cancellationToken).ConfigureAwait(false);
         }
-
-        TryMarkFailed(entry, "RECONCILIATION_INDETERMINATE");
-        throw new LocalMutationException("RECONCILIATION_INDETERMINATE");
     }
 
     public void Dispose()
@@ -311,34 +313,59 @@ internal sealed class RemoteLocalBridge : IRemoteLocalBridge, IDisposable
         }
         catch
         {
-            _mailbox.TryRemoveIfOwned(prepared.Command.CommandId);
+            if (!_mailbox.TryRemoveIfOwned(prepared.Command.CommandId))
+            {
+                // The command may still be waiting for a future Remote macro startup.
+                // Never report it failed or replay it; remain EXECUTING until the
+                // connection is cancelled and reconciliation can inspect evidence.
+                await WaitForStartEvidenceAsync(
+                    prepared.Command.CommandId,
+                    targetId,
+                    journal,
+                    cancellationToken).ConfigureAwait(false);
+            }
             throw;
         }
 
-        DateTimeOffset deadline = DateTimeOffset.UtcNow + StartConfirmationTimeout;
-        while (DateTimeOffset.UtcNow < deadline)
+        return await WaitForStartEvidenceAsync(
+            prepared.Command.CommandId,
+            targetId,
+            journal,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<LocalActionOutcome> WaitForStartEvidenceAsync(
+        Guid commandId,
+        string targetId,
+        CommandJournalEntry journal,
+        CancellationToken cancellationToken)
+    {
+        while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            BridgeStateData bridge = _bridgeState.ReadOrDefault();
-            if (bridge.LastCommandId == prepared.Command.CommandId &&
-                string.Equals(bridge.LastResult, "error", StringComparison.OrdinalIgnoreCase))
+            BridgeStateData? bridge = TryReadBridgeState();
+            if (bridge is not null)
             {
-                throw new LocalMutationException("MACRO_BRIDGE_REJECTED");
-            }
+                if (bridge.LastCommandId == commandId &&
+                    string.Equals(bridge.LastResult, "error", StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new LocalMutationException("MACRO_BRIDGE_REJECTED");
+                }
 
-            MacroSnapshot snapshot = await GetSnapshotAsync(cancellationToken).ConfigureAwait(false);
-            if (bridge.LastCommandId == prepared.Command.CommandId &&
-                string.Equals(bridge.LastResult, "start_accepted", StringComparison.OrdinalIgnoreCase) &&
-                HasNewStartEvidence(journal, bridge) &&
-                IsRunningTarget(snapshot, targetId, requireRoblox: true))
-            {
-                return new LocalActionOutcome(ActionResult.StrategyStarted, snapshot);
+                if (bridge.LastCommandId == commandId &&
+                    string.Equals(bridge.LastResult, "start_accepted", StringComparison.OrdinalIgnoreCase) &&
+                    HasNewStartEvidence(journal, bridge))
+                {
+                    MacroSnapshot? snapshot = await TryGetSnapshotAsync(cancellationToken).ConfigureAwait(false);
+                    if (snapshot is not null && IsRunningTarget(snapshot, targetId, requireRoblox: true))
+                    {
+                        return new LocalActionOutcome(ActionResult.StrategyStarted, snapshot);
+                    }
+                }
             }
 
             await Task.Delay(ActivePollInterval, cancellationToken).ConfigureAwait(false);
         }
-
-        throw new LocalMutationException("START_CONFIRMATION_TIMEOUT");
     }
 
     private async Task<LocalActionOutcome> ExecuteStopAsync(
@@ -346,12 +373,11 @@ internal sealed class RemoteLocalBridge : IRemoteLocalBridge, IDisposable
         CancellationToken cancellationToken)
     {
         _mailbox.Enqueue(prepared.Command.CommandId, "stop", null);
-        DateTimeOffset deadline = DateTimeOffset.UtcNow + SafeBoundaryTimeout;
-        while (DateTimeOffset.UtcNow < deadline)
+        while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            BridgeStateData bridge = _bridgeState.ReadOrDefault();
-            if (bridge.LastCommandId == prepared.Command.CommandId)
+            BridgeStateData? bridge = TryReadBridgeState();
+            if (bridge is not null && bridge.LastCommandId == prepared.Command.CommandId)
             {
                 if (string.Equals(bridge.LastResult, "error", StringComparison.OrdinalIgnoreCase))
                 {
@@ -359,8 +385,9 @@ internal sealed class RemoteLocalBridge : IRemoteLocalBridge, IDisposable
                 }
                 if (string.Equals(bridge.LastResult, "stopped_safe", StringComparison.OrdinalIgnoreCase))
                 {
-                    MacroSnapshot snapshot = await GetSnapshotAsync(cancellationToken).ConfigureAwait(false);
-                    if (snapshot.MacroState is MacroState.NotRunning or MacroState.Idle)
+                    MacroSnapshot? snapshot = await TryGetSnapshotAsync(cancellationToken).ConfigureAwait(false);
+                    if (snapshot is not null &&
+                        snapshot.MacroState is MacroState.NotRunning or MacroState.Idle)
                     {
                         return new LocalActionOutcome(ActionResult.StoppedSafe, snapshot);
                     }
@@ -369,8 +396,6 @@ internal sealed class RemoteLocalBridge : IRemoteLocalBridge, IDisposable
 
             await Task.Delay(ActivePollInterval, cancellationToken).ConfigureAwait(false);
         }
-
-        throw new LocalMutationException("SAFE_BOUNDARY_TIMEOUT");
     }
 
     private async Task<LocalActionOutcome> ExecuteSwitchAsync(
@@ -383,12 +408,11 @@ internal sealed class RemoteLocalBridge : IRemoteLocalBridge, IDisposable
             ?? throw new LocalMutationException("STRATEGY_NOT_FOUND");
         _mailbox.Enqueue(prepared.Command.CommandId, "switch", targetPath);
 
-        DateTimeOffset deadline = DateTimeOffset.UtcNow + SafeBoundaryTimeout;
-        while (DateTimeOffset.UtcNow < deadline)
+        while (true)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            BridgeStateData bridge = _bridgeState.ReadOrDefault();
-            if (bridge.LastCommandId == prepared.Command.CommandId)
+            BridgeStateData? bridge = TryReadBridgeState();
+            if (bridge is not null && bridge.LastCommandId == prepared.Command.CommandId)
             {
                 if (string.Equals(bridge.LastResult, "error", StringComparison.OrdinalIgnoreCase))
                 {
@@ -396,8 +420,8 @@ internal sealed class RemoteLocalBridge : IRemoteLocalBridge, IDisposable
                 }
                 if (string.Equals(bridge.LastResult, "switched_safe", StringComparison.OrdinalIgnoreCase))
                 {
-                    MacroSnapshot snapshot = await GetSnapshotAsync(cancellationToken).ConfigureAwait(false);
-                    if (IsRunningTarget(snapshot, targetId, requireRoblox: false))
+                    MacroSnapshot? snapshot = await TryGetSnapshotAsync(cancellationToken).ConfigureAwait(false);
+                    if (snapshot is not null && IsRunningTarget(snapshot, targetId, requireRoblox: false))
                     {
                         return new LocalActionOutcome(ActionResult.SwitchedSafe, snapshot);
                     }
@@ -406,8 +430,35 @@ internal sealed class RemoteLocalBridge : IRemoteLocalBridge, IDisposable
 
             await Task.Delay(ActivePollInterval, cancellationToken).ConfigureAwait(false);
         }
+    }
 
-        throw new LocalMutationException("SAFE_BOUNDARY_TIMEOUT");
+    private BridgeStateData? TryReadBridgeState()
+    {
+        try
+        {
+            return _bridgeState.ReadOrDefault();
+        }
+        catch (LocalMutationException)
+        {
+            return null;
+        }
+    }
+
+    private async Task<MacroSnapshot?> TryGetSnapshotAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await GetSnapshotAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception exception) when (
+            exception is LocalStatusException or StrategyCatalogException or IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
     }
 
     private void LaunchFixedRemoteMacro()
@@ -548,23 +599,26 @@ internal sealed class RemoteMailbox
         }
     }
 
-    internal void TryRemoveIfOwned(Guid commandId)
+    internal bool TryRemoveIfOwned(Guid commandId)
     {
         try
         {
             if (!File.Exists(_path))
             {
-                return;
+                return true;
             }
             MailboxCommand existing = ReadExisting();
-            if (existing.CommandId == commandId)
+            if (existing.CommandId != commandId)
             {
-                File.Delete(_path);
+                return false;
             }
+            File.Delete(_path);
+            return !File.Exists(_path);
         }
         catch (Exception exception) when (
             exception is IOException or UnauthorizedAccessException or LocalMutationException)
         {
+            return false;
         }
     }
 
