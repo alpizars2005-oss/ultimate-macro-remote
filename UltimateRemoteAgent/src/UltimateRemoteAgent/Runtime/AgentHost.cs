@@ -59,7 +59,7 @@ internal sealed class AgentHost
 
     private async Task RunConnectionAsync(CancellationToken cancellationToken)
     {
-        await using IAgentWebSocket socket = SystemClientWebSocket.Create(_enrollment.DeviceCredential);
+        IAgentWebSocket socket = SystemClientWebSocket.Create(_enrollment.DeviceCredential);
         await using var connection = new AgentWebSocketConnection(socket);
         await connection.ConnectAsync(_enrollment.WebSocketUri, cancellationToken).ConfigureAwait(false);
 
@@ -79,24 +79,27 @@ internal sealed class AgentHost
         var clock = new ServerSynchronizedClock();
         clock.Synchronize(welcome.ServerTime);
         using var dispatcher = new RemoteCommandDispatcher(_bridge, clock.GetUtcNow);
-
-        foreach (ReconciliationCommand reconciliation in welcome.ReconcileCommands)
-        {
-            await dispatcher.ReconcileAsync(
-                reconciliation,
-                connection.SendTextAsync,
-                cancellationToken).ConfigureAwait(false);
-        }
-
         using var connectionLifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         Task heartbeat = HeartbeatLoopAsync(
             connection,
             welcome.HeartbeatIntervalSeconds,
             connectionLifetime.Token);
         var commandTasks = new HashSet<Task>();
+
         try
         {
             SafeLog.Info("AGENT_CONNECTED");
+
+            // Reconciliation is evidence-only. It may wait for a previously queued
+            // safe-boundary command to finish, so heartbeats are already running.
+            foreach (ReconciliationCommand reconciliation in welcome.ReconcileCommands)
+            {
+                await dispatcher.ReconcileAsync(
+                    reconciliation,
+                    connection.SendTextAsync,
+                    connectionLifetime.Token).ConfigureAwait(false);
+            }
+
             while (!connectionLifetime.IsCancellationRequested)
             {
                 WebSocketInboundMessage inbound = await connection.ReadAsync(connectionLifetime.Token)
@@ -124,10 +127,14 @@ internal sealed class AgentHost
                     command,
                     connection.SendTextAsync,
                     connectionLifetime.Token);
-                commandTasks.Add(task);
+                lock (commandTasks)
+                {
+                    commandTasks.Add(task);
+                }
                 _ = task.ContinueWith(
                     completed =>
                     {
+                        _ = completed.Exception;
                         lock (commandTasks)
                         {
                             commandTasks.Remove(completed);
@@ -141,13 +148,7 @@ internal sealed class AgentHost
         finally
         {
             connectionLifetime.Cancel();
-            try
-            {
-                await heartbeat.ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-            }
+            await IgnoreConnectionTaskAsync(heartbeat).ConfigureAwait(false);
 
             Task[] pending;
             lock (commandTasks)
@@ -156,7 +157,7 @@ internal sealed class AgentHost
             }
             if (pending.Length > 0)
             {
-                await Task.WhenAll(pending.Select(IgnoreCancellationAsync)).ConfigureAwait(false);
+                await Task.WhenAll(pending.Select(IgnoreConnectionTaskAsync)).ConfigureAwait(false);
             }
 
             try
@@ -166,7 +167,8 @@ internal sealed class AgentHost
                     "agent_stopping",
                     CancellationToken.None).ConfigureAwait(false);
             }
-            catch (Exception exception) when (exception is IOException or WebSocketException or ObjectDisposedException)
+            catch (Exception exception) when (
+                exception is IOException or WebSocketException or ObjectDisposedException)
             {
             }
         }
@@ -218,13 +220,14 @@ internal sealed class AgentHost
         StrategyCatalogException or
         ProtocolException;
 
-    private static async Task IgnoreCancellationAsync(Task task)
+    private static async Task IgnoreConnectionTaskAsync(Task task)
     {
         try
         {
             await task.ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
+        catch (Exception exception) when (
+            exception is OperationCanceledException or IOException or WebSocketException)
         {
         }
     }
