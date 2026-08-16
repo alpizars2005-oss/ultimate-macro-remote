@@ -350,10 +350,29 @@ internal static class RemoteBootstrap
 
         var enrollmentStore = new DpapiEnrollmentStore(DpapiEnrollmentStore.DefaultPath);
         EnrollmentRecord? enrollment = TryLoadEnrollment(enrollmentStore);
-        if (enrollment is null ||
-            !string.Equals(enrollment.MacroRoot, macroRoot, StringComparison.OrdinalIgnoreCase) ||
-            !SameOrigin(enrollment.HttpsOrigin, origin))
+        if (enrollment is null)
         {
+            enrollment = await EnrollWithDiscordAsync(
+                origin,
+                macroRoot,
+                enrollmentStore,
+                cancellationToken).ConfigureAwait(false);
+        }
+        else if (SameOrigin(enrollment.HttpsOrigin, origin))
+        {
+            // Moving or re-extracting the macro must not ask the user to connect
+            // Discord again. The device credential is already bound to this Windows
+            // user through DPAPI; only refresh the validated local installation root.
+            if (!string.Equals(enrollment.MacroRoot, macroRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                enrollment = enrollment with { MacroRoot = macroRoot };
+                enrollmentStore.Save(enrollment);
+            }
+        }
+        else
+        {
+            // A different service origin is a different trust boundary. Never copy an
+            // existing bearer across origins; require a fresh authoritative enrollment.
             enrollment = await EnrollWithDiscordAsync(
                 origin,
                 macroRoot,
