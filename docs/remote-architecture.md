@@ -1,175 +1,226 @@
-# Ultimate Remote architecture and milestone plan
+# Ultimate Macro Remote — current architecture
 
-## Inspected baseline
+This document describes the current private R5 development architecture. Historical R1/R2/R3 milestone notes have been removed from the main description so a reviewer can see the system as it exists now.
 
-The branch was clean before R2 at `01648e5` on
-`feature/ultimate-remote-agent`. R1 is commit `07a751e` and remains based on the
-validated watchdog boundary in `5a48792`.
+## Design goals
 
-`Main_Remote.ahk` already consumes START during startup and consumes STOP/SWITCH at the
-between-match safe gate after its initial disconnect/reconnect check and before the main
-restart/join/equip flow. Reconnect recovery can therefore delay a queued safe command.
-Its mailbox is a single UTF-16
-INI slot and its state/result file is under the interactive user's `%APPDATA%`. This
-milestone does not edit `Main.ahk`, `Main_Remote.ahk`, `submacros/watchdog.ahk`, or any
-gameplay loop.
+Remote should provide useful Discord control without becoming a generic remote-access product and without weakening Ultimate Macro's timing-sensitive gameplay execution.
 
-## Architecture after R3
+The design therefore prefers:
+
+- fixed allowlisted operations over arbitrary execution;
+- authoritative Discord identity over client-supplied owner/device IDs;
+- opaque strategy IDs over local paths;
+- outbound Agent transport over inbound client listeners;
+- durable evidence/reconciliation over blind retries;
+- safe between-match STOP/SWITCH over mid-match interruption;
+- explicit user consent and per-user enrollment over silent installation.
+
+## System overview
 
 ```text
-Discord bot (central only)
-        |
-        | in-process API using interaction.user.id
-        v
-RemoteService ---- SQLite device/owner/command state
-        |
-        | authenticated WSS /remote/v1/agent
-        v
-UltimateRemoteAgent (R3)
-        |
-        +-- exact process/state inspection (read-only)
-        +-- approved Resources\Strats catalog (read-only)
-
-/macro pair -> PairingService -> hashed, expiring ticket in SQLite
-                                      |
-                                      | empty-body HTTPS POST /remote/v1/pair
-                                      v
-                         one-time R1 device credential
-
-UltimateRemoteAgent -> local mutation bridge -> Ultimate Macro -> Roblox
-     (R3 transport)         (future R4)          (existing safe gate)
+                            Discord
+                    OAuth2 identify + slash commands
+                              |
+                              v
++----------------------------------------------------------------+
+|                     Central Remote runtime                      |
+|                                                                |
+|  RemoteDiscordClient / MacroCommandController                  |
+|                 |                                              |
+|                 v                                              |
+|           RemoteService  <---->  RemoteStore / SQLite          |
+|                 |                                              |
+|                 +---- OAuth onboarding / legacy pairing        |
+|                 |                                              |
+|                 +---- authenticated WebSocket endpoint         |
++-----------------|----------------------------------------------+
+                  |
+                  | WSS /remote/v1/agent
+                  | Authorization: Bearer <device credential>
+                  v
++----------------------------------------------------------------+
+|                 UltimateRemoteAgent.exe (Windows)              |
+|                                                                |
+|  DPAPI enrollment                                               |
+|  exact process/state inspection                                 |
+|  approved strategy catalog                                      |
+|  durable command journal                                        |
+|  fixed START launcher                                           |
+|  safe STOP/SWITCH mailbox                                       |
++-----------------|----------------------------------------------+
+                  |
+                  v
+             Main_Remote.ahk
+                  |
+          startup START consumer
+          between-match safe gate
+                  |
+                  v
+              Roblox / TDS
 ```
 
-R1 supplies the strict protocol, authenticated outbound-Agent endpoint, connection and
-heartbeat state, revocable hashed credentials, durable owner/device association,
-ownership-safe dispatch, one-mutating-command gate, lifecycle correlation, and a
-simulated-Agent integration test. `RemoteService.dispatch_for_user` takes the
-authoritative Discord user ID and has no device-ID parameter.
+## Identity and ownership
 
-R2 adds a central-only Discord adapter and an isolated temporary development-pairing
-API. The five control commands pass `interaction.user.id` to `RemoteService` and accept
-no user or device selector. `/macro pair` binds a 256-bit ticket to that same identity;
-only the ticket digest is stored. Redemption is rate-limited and atomically consumes
-the ticket while creating the existing R1 device bearer. `RemoteStore.provision_device`
-remains an internal test primitive and is not exposed by HTTP or Discord.
+For normal onboarding, the Windows Agent creates a random one-time setup secret and opens the central Discord OAuth authorization URL. Central uses only Discord's authorization-code flow with the `identify` scope to determine the owner account.
 
-R3 adds the real Windows transport and a read-only local bridge. The self-contained
-`win-x64` Agent stores its entire enrollment envelope under the interactive user's
-LocalAppData using DPAPI CurrentUser, opens only an outbound authenticated WSS
-connection with normal Windows certificate validation, advertises only GET_STATUS and
-LIST_STRATEGIES, sends low-frequency protocol heartbeats, and reconnects with capped
-exponential full jitter. It parses reconciliation IDs as metadata and never treats them
-as commands.
+The client does not submit a Discord user ID. The callback uses an unpredictable OAuth `state`, and the setup secret is transported separately in the Agent's authorization header.
 
-Status requires a successful WMI census of the fixed bundled AutoHotkey executable and
-exact `Main_Remote.ahk` argument, then rechecks PID/creation identity after reading the
-bounded UTF-16 state file. Stale `Running=1` cannot prove a live macro. Strategy listing
-is top-level `.strat` only under the fixed approved root, with handle-resolved local
-containment, reparse/network/traversal/duplicate rejection, and path-free opaque IDs.
-The Agent contains no launcher, mailbox writer, command journal, OCR, image scanner,
-startup persistence, or local START/STOP/SWITCH implementation.
+For ongoing Discord commands, `interaction.user.id` is passed directly to `RemoteService.dispatch_for_user`. The command API intentionally has no user-supplied owner or device selector.
 
-For local backend development after installing `requirements.txt`, run
-`python -m central.server`. It binds `127.0.0.1:8765`, stores state under
-`runtime/central`, and exposes `/healthz`, the authenticated Agent WebSocket, and the
-ticket-redemption endpoint. It does not run the Discord ticket issuer. Run `bot.py` (or
-`python -m central.runtime`) for the single-process R2 Discord + HTTP runtime.
-The store holds a process-lifetime `remote.db.lock` and refuses a second backend writer;
-the SQLite directory is local to PC A and must not be shared over a network filesystem.
-The simulated-Agent integration suite is the supported R1 exercise path.
+The current milestone supports exactly one active linked device per Discord account. If more than one exists, central fails closed because device selection is not implemented.
 
-## R2 security boundary
+## Device enrollment and authentication
 
-The Discord client is configured with `AllowedMentions.none()`, every command response
-is ephemeral, and Agent strategy names are treated as untrusted display text: control
-characters are removed, Discord mentions and markdown are escaped, output is bounded,
-and autocomplete submits only opaque strategy IDs. Agent `error_message` values are
-never rendered. Stable error codes map to fixed user-facing text; unknown codes get a
-generic message. The legacy local bot behavior, `/macro cancel`, local strategy paths,
-AHK launch, and manually configured allowed-user ID are absent from the central runtime.
+Central creates a random device bearer credential for the linked installation. SQLite stores a digest rather than the plaintext bearer.
 
-Pairing is outside protocol 1 and can later be replaced by OAuth without changing the
-Agent command schema. Tickets use 256 random bits, expire after ten minutes by default,
-are single-use and hash-only in SQLite, supersede older live tickets, and are limited
-per Discord owner, direct socket peer, and globally. Redemption accepts the ticket only
-in `Authorization: Pairing …`; it accepts no body/query identity data and returns the
-device bearer once with no-store headers. See `remote-pairing-v1.md`.
+The Agent stores its enrollment envelope in the interactive Windows user's LocalAppData with DPAPI CurrentUser protection. The envelope binds:
 
-## Smallest remaining vertical-slice milestones
+- the trusted HTTPS service origin;
+- the derived WSS endpoint;
+- the validated local macro root;
+- the device credential.
 
-### R4 — fixed local START/STOP/SWITCH adapter
+Re-extracting/moving the macro to another valid local path on the same Windows account and same service origin refreshes only the trusted local macro root. A different service origin is treated as a different trust boundary and requires fresh enrollment.
 
-Add the Agent's canonical fixed `Main_Remote.ahk` launcher, atomic UTF-16 mailbox adapter,
-durable command journal/reconciliation, exact process identity checks, and approved-root
-strategy resolver. Translate IDs to validated local paths only after extension,
-containment, UNC/device/traversal, duplicate, and reparse checks. Serialize the one-slot
-mailbox. Map matching AHK results conservatively as defined in protocol 1. Do not edit
-or poll inside `PlayStrategy`, SpawnTower, UpgradeTower, ability/recorded timing, or any
-gameplay-sensitive loop.
+The background Agent connects outbound; the client machine exposes no inbound Remote listener.
 
-START is startup-only and `#SingleInstance Force` can replace a live macro. The Agent
-must fail START when gameplay is active and direct the user to SWITCH. It may reuse or
-restart an exact `Main_Remote.ahk` process only after positive idle confirmation; stale
-`state.ini` alone is insufficient, and watchdog PID handoff needs grace/debounce. It
-must never overwrite an occupied one-slot mailbox.
+## Transport
 
-The current AHK `start_accepted` result is too early to prove START completion. Until a
-later lifecycle marker is validated, the Agent must leave START in `executing`. R4 must
-implement and manually validate `strategy_started` before R5: observe a new nonzero
-`State.TimeWhenStartedPlaying` written after this START reset, correlate the exact
-command/process/strategy, and require Roblox running. Do this externally with a
-FileSystemWatcher/debounce or low-rate fallback; do not add polling to gameplay code.
+Protocol 1 uses authenticated JSON-over-WebSocket at `/remote/v1/agent`.
 
-### R5 — consent, logon start, packaging, and two-PC acceptance
+The Agent sends HELLO, receives WELCOME, then exchanges commands, updates, and periodic snapshot heartbeats. Central tracks online/offline state and stores durable command lifecycle state.
 
-Add the optional onboarding wording and controls, a per-user logon-start method that is
-easy to disable/uninstall, and packaging. Logon starts only the Agent; it never launches
-Ultimate Macro, Roblox, or a strategy until a Remote command is received. Run the full
-PC-A/PC-B acceptance checklist, including safe deferred switch/stop.
+Cross-machine transport requires normally trusted HTTPS/WSS. Plaintext is reserved for literal loopback development. A reverse proxy/tunnel must preserve the `Authorization` header and WebSocket Upgrade semantics.
 
-Replace temporary pairing with Discord OAuth when the infrastructure gate below is
-satisfied.
+## Operation allowlist
 
-## Dependencies
+Protocol 1 supports exactly:
 
-- R1 adds direct `aiohttp>=3.13,<4` use. SQLite, JSON, hashing, secrets, TLS, and tests use
-  the Python standard library.
-- R2 reuses `discord.py` and `python-dotenv`, already declared.
-- R3 targets `net10.0-windows`. Microsoft `System.Management` supplies the bounded WMI
-  command-line census needed to distinguish the exact AHK script, and
-  `System.Security.Cryptography.ProtectedData` supplies DPAPI CurrentUser. The
-  `win-x64` single-file release is self-contained; no runtime is installed on PC B.
+- `GET_STATUS`
+- `LIST_STRATEGIES`
+- `START_STRATEGY`
+- `STOP_SAFE`
+- `SWITCH_STRATEGY`
 
-## TLS, hosting, and OAuth infrastructure gate
+There is no protocol operation for generic EXEC, shell, CMD, PowerShell, remote desktop, arbitrary executable path, arbitrary file browser, arbitrary upload/download, or download-and-execute behavior.
 
-The backend defaults to `127.0.0.1` plaintext solely so a local reverse proxy can
-terminate TLS. A two-PC test still needs a stable, PC-B-reachable WSS/HTTPS origin with
-a trusted certificate. A provider-neutral secure tunnel is acceptable for development,
-provided it supports WebSocket upgrades and preserves the Authorization header. Core
-logic does not select a tunnel provider.
+## Local status and strategy catalog
 
-The safest final identity flow is Discord's authorization-code flow with only the
-`identify` scope, a one-time CSRF `state`, exact registered redirect URI validation,
-server-side code exchange and `/users/@me` lookup, then immediate token discard/revoke
-after the Discord snowflake is persisted. The client secret remains only on PC A.
-Discord's official OAuth documentation describes the exact redirect and `state`
-requirements: <https://docs.discord.com/developers/topics/oauth2>.
+Status is based on conservative process/state inspection rather than trusting a stale `state.ini` flag alone. The Agent identifies the fixed bundled AutoHotkey executable and exact `Main_Remote.ahk` command line before treating the Remote-capable macro as live.
 
-That OAuth implementation is not attempted in R2 because this workspace has no stable
-public HTTPS base URL, trusted TLS termination, registered Discord redirect URI, OAuth
-client ID/secret configuration, or WebSocket-capable public routing. Do not silently
-infer identity from guild membership, usernames, or a manually typed Discord ID.
+Remote strategy discovery is intentionally restricted to top-level `.strat` files in the approved `Resources\Strats` directory. The Agent:
+
+- rejects traversal/rooted/UNC/device escapes;
+- rejects reparse-point escapes;
+- resolves the final local path under the approved root;
+- generates deterministic opaque IDs;
+- returns only `{strategy_id, name}` to central/Discord.
+
+A local strategy path never crosses the network protocol.
+
+## START architecture
+
+START is permitted only when the Agent can safely establish that an active strategy is not already running.
+
+The selected strategy ID is resolved inside the approved strategy catalog. The Agent writes the fixed local START request and launches only:
+
+```text
+<macro root>\submacros\AutoHotkey64.exe <macro root>\Main_Remote.ahk
+```
+
+No network-supplied executable path or arbitrary command-line argument is accepted.
+
+`Main_Remote.ahk` consumes the START request during startup. START is not considered complete merely because the AHK script accepted the mailbox request; the Agent waits for fresh lifecycle evidence for the requested strategy and a running Roblox process before reporting `strategy_started`.
+
+## STOP/SWITCH safe boundary
+
+STOP and SWITCH are intentionally different from START.
+
+The Agent validates the command and local target, durably journals the mutation, then places a matching command in the one-slot UTF-16 local mailbox. `Main_Remote.ahk` consumes these mutations only at the existing validated between-match gate in `RunStrategy()`.
+
+The Remote system does **not** inject command checks into:
+
+- `PlayStrategy()`;
+- tower placements;
+- upgrades;
+- abilities;
+- recorded Click/Send/Sleep actions;
+- other timing-sensitive gameplay loops.
+
+Reconnect/recovery work can delay a queued STOP/SWITCH. That delay is intentional because preserving a match is preferred to immediate remote interruption.
+
+## Mutation lifecycle and reconciliation
+
+Central stores the command lifecycle. The Agent also keeps a durable local mutation journal before performing side effects.
+
+Conceptually:
+
+```text
+queued -> accepted -> executing -> completed
+   \          \           \
+    \          \           -> failed (definite outcome)
+     \          -> connection loss / ambiguity -> reconciling
+      -> delivery failure
+```
+
+For gameplay mutations, loss of transport after a local side effect may create an ambiguous outcome. Central moves the command to `reconciling` rather than replaying it. WELCOME carries reconciliation metadata on reconnect; the Agent compares that metadata with its durable local journal and AHK evidence.
+
+Availability deliberately yields to safety: another conflicting gameplay mutation is blocked while the previous one has an unresolved outcome.
+
+## Consent and Windows startup
+
+When a packaged Agent and `remote_service.url` are present beside the macro, `Main_Remote.ahk` can start the Agent bootstrap independently. A Remote bootstrap failure must not prevent normal macro UI startup.
+
+The preview consent dialog explains the allowlisted capabilities and lets the user decline Remote. If enabled, the user may also choose current-user Windows startup.
+
+The startup registry entry launches only:
+
+```text
+UltimateRemoteAgent.exe run-background
+```
+
+It does not start Roblox, Ultimate Macro, or a strategy on login. A later authenticated START command is still required.
+
+## Central runtime and storage
+
+The normal development/operator process is `run_bot.bat`, which starts the aiohttp backend and Discord client in one process sharing one `RemoteStore` and SQLite database.
+
+The backend normally binds to literal loopback (`127.0.0.1:8765`) behind trusted TLS termination. The SQLite directory is local server state and should not be shared over a network filesystem or copied into client packages.
 
 ## Security assumptions
 
-- PC A, its OS account, SQLite file, environment, and TLS terminator are trusted.
-- A random device bearer authenticates one installation; server compromise can issue
-  only protocol-allowlisted operations, not arbitrary execution.
-- DPAPI CurrentUser storage protects against another Windows account or
-  offline copying, not malware already running as the same user or a local administrator.
-- The current AHK mailbox is unauthenticated local same-user IPC. The Agent must validate
-  every network command and path before writing it.
-- Discord account compromise grants the attacker the five allowlisted macro operations
-  for that account's linked device, but no shell, file, credential, or desktop access.
-- When delivery outcome is ambiguous, availability yields to safety: the command enters
-  `reconciling`, is not replayed, and blocks conflicting gameplay-changing commands.
+- The central server OS account, environment, SQLite database, and TLS termination are trusted operator infrastructure.
+- DPAPI CurrentUser protects against casual offline copying/another Windows user, not malware already running with the same user privileges or a local administrator.
+- The local AHK mailbox is same-user local IPC, not a separate cryptographic trust boundary; the Agent must validate network inputs before writing it.
+- Discord account compromise grants only the five allowlisted Remote operations for that account's linked device, not generic machine access.
+- A central compromise could issue only operations implemented by the Agent/protocol; it does not magically create shell/desktop capabilities that are absent locally.
+- When execution outcome is uncertain, commands are not automatically replayed.
+
+## Current preview limitations
+
+### One-device milestone
+
+Only one active linked device per Discord account is supported. Multi-device naming/selection requires a later protocol/product decision.
+
+### Development hosting
+
+A Cloudflare Quick Tunnel can satisfy trusted TLS/WSS for private testing, but its random hostname is not stable infrastructure. Production needs a stable hostname, service supervision, backups/retention decisions, monitoring, and normal secret rotation.
+
+### OAuth onboarding crash window
+
+Current OAuth setup session/state data is process-local memory. After authoritative Discord identity is verified, the callback provisions a durable device row before reporting browser success. The Agent then polls the setup session, stores the returned credential with DPAPI, and completes setup.
+
+If the central process crashes/restarts in the narrow interval after device provisioning but before Agent completion, the in-memory setup session is lost while the durable device row can remain active/offline. Current operator recovery is to revoke/clean that orphan before retrying. A production design should persist an explicit pending-enrollment state or otherwise make this crash path automatically recoverable.
+
+### Distribution
+
+Formal public Terms/Privacy and an upstream-controlled distribution/licensing review are still required before public release.
+
+## Related documents
+
+- `remote-protocol-v1.md` — exact central/Agent wire contract.
+- `windows-agent-r5.md` — Windows Agent build/runtime behavior.
+- `remote-server-r5.md` — central configuration and operation.
+- `remote-preview-r5.md` — intended end-user/private-preview experience.
+- `remote-pairing-v1.md` — legacy development fallback, not normal onboarding.
