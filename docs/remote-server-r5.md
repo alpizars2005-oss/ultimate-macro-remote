@@ -15,6 +15,35 @@ The normal R5 development runtime is one process started by `run_bot.bat` contai
 
 Do not start multiple writers against the same SQLite state directory.
 
+### Reusing the existing official Ultimate Macro bot
+
+`run_bot.bat` is the **standalone private-preview composition**. It is not a requirement for an upstream integration.
+
+If Ultimate Macro already has an official Discord bot/application, the preferred production/upstream shape is to keep that bot and integrate the Remote components into its existing runtime instead of creating a second public bot.
+
+Reuse the same Discord application values:
+
+```env
+DISCORD_TOKEN=<existing official bot token>
+DISCORD_CLIENT_ID=<same Discord application's Application/Client ID>
+DISCORD_CLIENT_SECRET=<same application's OAuth2 Client Secret>
+```
+
+Keep the bot token and OAuth Client Secret private and server-side. They are different credentials.
+
+For the official bot, do **not** launch another `RemoteDiscordClient` with the same token while the existing bot is already online. Instead:
+
+- create one `RemoteStore` and one `RemoteService`;
+- create the Remote `PairingService`/`OnboardingService` around that same store;
+- start the aiohttp app created by `central.server.create_app(...)` in the existing process/event loop;
+- instantiate `MacroCommandController` using the shared service/pairing instances;
+- add the Remote `/macro` commands to the official bot's existing `CommandTree`/cog/extension system;
+- use the official bot's existing command sync/deployment policy.
+
+The standalone preview client's `setup_hook()` synchronizes the command tree it owns. That is useful for a dedicated test Discord application, but it should not be allowed to replace/omit unrelated commands from an existing official bot application.
+
+Detailed steps and a code-integration outline are in [`existing-bot-integration.md`](existing-bot-integration.md).
+
 ## Compatibility/configuration model
 
 `ULTIMATE_REMOTE_PUBLIC_HTTPS_ORIGIN` is the shared public origin used by:
@@ -65,7 +94,7 @@ Never copy any of the following into the client package:
 
 ## Discord OAuth redirect
 
-Register exactly one callback matching the configured public origin:
+Register exactly one callback matching the configured public origin on the same Discord application used by the official bot:
 
 ```text
 https://YOUR_REMOTE_HOST/remote/v1/onboarding/discord/callback
@@ -74,6 +103,8 @@ https://YOUR_REMOTE_HOST/remote/v1/onboarding/discord/callback
 The central preflight prints the exact callback URI without printing secret values.
 
 If the public hostname changes, the Discord Developer Portal redirect URI must change with it.
+
+The Remote browser onboarding asks only for OAuth `identify`; it does not require a second bot user or a second public bot application.
 
 ## Safe preflight
 
@@ -89,13 +120,17 @@ Require working OAuth configuration:
 .\.venv\Scripts\python.exe -m central.preflight --require-oauth
 ```
 
-`run_bot.bat` performs the normal preflight before launching the runtime.
+`run_bot.bat` performs the normal preflight before launching the standalone preview runtime.
 
 ## Start central runtime
+
+For isolated development with the repository's own Discord client:
 
 ```powershell
 .\run_bot.bat
 ```
+
+For integration into the existing official bot, start the aiohttp Remote app and shared Remote services using the official bot's lifecycle instead; see `existing-bot-integration.md`.
 
 The development listener normally remains on:
 
@@ -131,7 +166,7 @@ Its hostname is ephemeral. If `cloudflared` restarts and returns a new `*.tryclo
 
 1. update `ULTIMATE_REMOTE_PUBLIC_HTTPS_ORIGIN` in `.env`;
 2. replace the Discord OAuth Redirect URI with the callback under that hostname;
-3. restart `run_bot.bat`;
+3. restart the Remote backend/runtime;
 4. rebuild/re-stage the client so `remote_service.url` contains the same new origin;
 5. expect existing client enrollments bound to the previous origin to require fresh onboarding.
 
@@ -256,7 +291,7 @@ A production integration should define:
 
 ## Legacy `/macro pair`
 
-`/macro pair` is retained only as a development fallback. It is not the intended R5 user flow.
+`/macro pair` is retained only as a development fallback. It is not the intended R5 user flow and can be omitted from the official bot's public command tree.
 
 See `remote-pairing-v1.md` for the isolated ticket contract.
 
@@ -265,6 +300,7 @@ See `remote-pairing-v1.md` for the isolated ticket contract.
 Do not call the current development stack production-ready until at least:
 
 - the upstream owner approves integration/distribution;
+- the Remote command group has been integrated without breaking the official bot's existing commands/features;
 - stable hosting replaces Quick Tunnel development;
 - OAuth pending-enrollment crash recovery is durable;
 - formal Terms/Privacy are reviewed;
