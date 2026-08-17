@@ -20,6 +20,24 @@ The current private preview includes:
 - Central SQLite owner/device/command state.
 - Packaging and CI coverage.
 
+## Existing Ultimate Macro bot
+
+A second public Discord bot is **not required**.
+
+If the official Ultimate Macro bot/application is already deployed, the preferred upstream integration is to reuse that same Discord application and bot process:
+
+- keep the existing bot token and visible bot identity;
+- use the same application's Client ID and OAuth2 Client Secret for **Connect Discord**;
+- add the Remote OAuth callback URI to the existing Discord application;
+- instantiate the Remote backend/service/store once inside or alongside the existing bot runtime;
+- attach the Remote `/macro` subcommands to the existing bot's `CommandTree` using `MacroCommandController`;
+- keep the official bot's existing command-sync policy, intents, cogs/extensions, permissions, and other commands;
+- do **not** run a second standalone `RemoteDiscordClient` with the same official bot token while the official bot is online.
+
+The standalone `run_bot.bat`/`RemoteDiscordClient` path is mainly for isolated development with a dedicated test application. Its command tree sync should not be used to define the official application's entire command scope if the official bot already has unrelated commands.
+
+See [`docs/existing-bot-integration.md`](docs/existing-bot-integration.md) for the detailed migration/integration steps.
+
 ## Fast code-review map
 
 Start with these files:
@@ -33,6 +51,8 @@ Start with these files:
 - `central/service.py` — owner-safe dispatch and lifecycle.
 - `central/store.py` — SQLite persistence and credential/device state.
 - `central/discord_bot.py` — safe Discord presentation and slash commands.
+- `central/runtime.py` — standalone private-preview composition; useful as a reference, not required as the official bot entry point.
+- `docs/existing-bot-integration.md` — how to reuse the official Ultimate Macro bot/application.
 - `docs/remote-protocol-v1.md` — closed wire contract.
 
 ## Security properties intended by design
@@ -72,7 +92,8 @@ START is handled separately: if the Agent proves the macro is not running, it re
 3. **Stable hosting is not implemented here.** Development can use a trusted HTTPS/WSS tunnel, but production needs a stable hostname and normal service operations.
 4. **Formal public Terms/Privacy are not final.** Current consent text is preview wording.
 5. **OAuth setup session persistence needs hardening.** OAuth session state is in process memory. The callback currently provisions the device row before returning success so the browser cannot claim a link that does not exist. If the central process crashes after that provisioning but before the Agent completes enrollment, the in-memory session is lost and the newly provisioned offline device can require operator cleanup. A production version should persist a pending-enrollment state or otherwise make this crash window recoverable automatically.
-6. **Distribution/licensing review remains upstream-owned.** This branch is intentionally private and should not be redistributed without project-owner approval.
+6. **Official-bot integration should reuse the existing command tree.** The standalone preview client's sync path is for isolated testing and should not replace the official bot's unrelated application commands.
+7. **Distribution/licensing review remains upstream-owned.** This branch is intentionally private and should not be redistributed without project-owner approval.
 
 ## Verification commands
 
@@ -111,7 +132,8 @@ For a real integration review, use one central server and one Windows client ins
 - `/macro switch` remains pending during gameplay and applies only at the safe boundary;
 - `/macro stop` remains pending during gameplay and applies only at the safe boundary;
 - Windows Agent autostart does not start Roblox/the macro by itself;
-- central/Agent connection loss does not cause a gameplay mutation to be blindly replayed.
+- central/Agent connection loss does not cause a gameplay mutation to be blindly replayed;
+- when integrated into the official bot, existing non-Remote commands continue to register and behave normally.
 
 ## Intent
 
