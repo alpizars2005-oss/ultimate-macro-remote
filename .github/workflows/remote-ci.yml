@@ -43,13 +43,19 @@ jobs:
       - name: Publish self-contained Agent
         shell: pwsh
         run: dotnet publish .\UltimateRemoteAgent\src\UltimateRemoteAgent\UltimateRemoteAgent.csproj -c Release -p:PublishProfile=win-x64
-      - name: Smoke-build same-origin zero-config client package on Windows PowerShell 5.1
+      - name: Smoke local client setup and zero-config package on Windows PowerShell 5.1
         shell: powershell
         run: |
           $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
           [IO.File]::WriteAllText((Join-Path (Get-Location) '.env'), 'ULTIMATE_REMOTE_PUBLIC_HTTPS_ORIGIN=https://remote.example', $utf8NoBom)
+          .\tools\prepare_local_remote_client.ps1
+          if (-not (Test-Path .\UltimateRemoteAgent.exe)) { throw "Local development Agent was not staged." }
+          if (-not (Test-Path .\remote_service.url)) { throw "Local development service origin was not staged." }
+          if ((Get-Content -LiteralPath .\remote_service.url -Raw).Trim() -ne 'https://remote.example') { throw "Local development service origin did not match .env." }
           .\tools\package_remote_preview.ps1 -OutputDirectory .\ci-package
           Remove-Item -LiteralPath .\.env -Force
+          Remove-Item -LiteralPath .\UltimateRemoteAgent.exe -Force
+          Remove-Item -LiteralPath .\remote_service.url -Force
           if (-not (Test-Path .\ci-package\Ultimate_Macro_Remote_Preview.zip)) { throw "Client package was not produced." }
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path .\ci-package\Ultimate_Macro_Remote_Preview.zip))
