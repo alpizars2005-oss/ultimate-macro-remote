@@ -43,6 +43,10 @@ Settings.tds
 *.sqlite3-journal
 *.lock
 
+# Local development Remote client bridge files
+/UltimateRemoteAgent.exe
+/remote_service.url
+
 # Generated build and editor artifacts
 bin/
 obj/
