@@ -60,7 +60,9 @@ jobs:
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path .\ci-package\Ultimate_Macro_Remote_Preview.zip))
           try {
-            $entry = $zip.Entries | Where-Object { $_.FullName -eq "Ultimate_Macro_Remote/remote_service.url" }
+            # Windows PowerShell 5.1 Compress-Archive may preserve directory separators
+            # as backslashes in ZipArchiveEntry.FullName. Normalize only for comparison.
+            $entry = $zip.Entries | Where-Object { (($_.FullName -replace '\\','/')) -eq "Ultimate_Macro_Remote/remote_service.url" }
             if ($null -eq $entry) { throw "remote_service.url is missing from client package." }
             $reader = New-Object IO.StreamReader($entry.Open())
             try { $embedded = $reader.ReadToEnd().Trim() } finally { $reader.Dispose() }
