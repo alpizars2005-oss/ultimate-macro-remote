@@ -1,0 +1,79 @@
+name: Ultimate Remote CI
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  central-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - name: Install central dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run central tests
+        run: python -B -m unittest discover -s tests -v
+
+  windows-agent:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+      - name: Restore
+        shell: pwsh
+        run: dotnet restore .\UltimateRemoteAgent\UltimateRemoteAgent.slnx
+      - name: Build
+        shell: pwsh
+        run: dotnet build .\UltimateRemoteAgent\UltimateRemoteAgent.slnx -c Release --no-restore
+      - name: Test
+        shell: pwsh
+        run: dotnet test .\UltimateRemoteAgent\UltimateRemoteAgent.slnx -c Release --no-build
+      - name: Verify formatting
+        shell: pwsh
+        run: dotnet format .\UltimateRemoteAgent\UltimateRemoteAgent.slnx --verify-no-changes --no-restore
+      - name: Publish self-contained Agent
+        shell: pwsh
+        run: dotnet publish .\UltimateRemoteAgent\src\UltimateRemoteAgent\UltimateRemoteAgent.csproj -c Release -p:PublishProfile=win-x64
+      - name: Smoke local client setup and zero-config package on Windows PowerShell 5.1
+        shell: powershell
+        run: |
+          $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+          [IO.File]::WriteAllText((Join-Path (Get-Location) '.env'), 'ULTIMATE_REMOTE_PUBLIC_HTTPS_ORIGIN=https://remote.example', $utf8NoBom)
+          .\tools\prepare_local_remote_client.ps1
+          if (-not (Test-Path .\UltimateRemoteAgent.exe)) { throw "Local development Agent was not staged." }
+          if (-not (Test-Path .\remote_service.url)) { throw "Local development service origin was not staged." }
+          if ((Get-Content -LiteralPath .\remote_service.url -Raw).Trim() -ne 'https://remote.example') { throw "Local development service origin did not match .env." }
+          .\tools\package_remote_preview.ps1 -OutputDirectory .\ci-package
+          Remove-Item -LiteralPath .\.env -Force
+          Remove-Item -LiteralPath .\UltimateRemoteAgent.exe -Force
+          Remove-Item -LiteralPath .\remote_service.url -Force
+          if (-not (Test-Path .\ci-package\Ultimate_Macro_Remote_Preview.zip)) { throw "Client package was not produced." }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path .\ci-package\Ultimate_Macro_Remote_Preview.zip))
+          try {
+            # Windows PowerShell 5.1 Compress-Archive may preserve directory separators
+            # as backslashes in ZipArchiveEntry.FullName. Normalize only for comparison.
+            $entry = $zip.Entries | Where-Object { (($_.FullName -replace '\\','/')) -eq "Ultimate_Macro_Remote/remote_service.url" }
+            if ($null -eq $entry) { throw "remote_service.url is missing from client package." }
+            $reader = New-Object IO.StreamReader($entry.Open())
+            try { $embedded = $reader.ReadToEnd().Trim() } finally { $reader.Dispose() }
+            if ($embedded -ne "https://remote.example") { throw "Client package origin did not match central .env origin." }
+          } finally {
+            $zip.Dispose()
+          }
+      - name: Upload zero-config client package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ultimate-macro-remote-preview
+          path: .\ci-package\Ultimate_Macro_Remote_Preview.zip
+          if-no-files-found: error
+          retention-days: 7

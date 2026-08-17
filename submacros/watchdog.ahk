@@ -37,16 +37,36 @@ global RestartImg := ResourcesDir "\Restart.png"
 global RestartImg2 := ResourcesDir "\Restart2.png"
 global cancel := ResourcesDir "\cancel.png"
 
+global WatchdogLogDir := A_AppData "\Ultimate_Macro\logs"
+global WatchdogLogFile := WatchdogLogDir "\watchdog.log"
+global MainPID := 0
+global MainScriptPath := ""
+global MainScriptDir := ""
+global ParentClosedByWatchdog := false
+
 pToken := Gdip_Startup()
 
 OnExit(CleanupGdip)
- 
-if (A_Args.Length < 1) {
-    MsgBox("You are not supposed to run it manually!")
-    ExitApp()
+
+if (A_Args.Length != 2) {
+    WriteWatchdogLog("validation_failed", "expected_parent_pid_and_script_path")
+    ExitApp(2)
 }
 
-MainPID := A_Args[1]
+rawMainPID := Trim(A_Args[1])
+rawMainScriptPath := Trim(A_Args[2])
+
+try {
+    parentIdentity := ValidateWatchdogParent(rawMainPID, rawMainScriptPath)
+    MainPID := parentIdentity.pid
+    MainScriptPath := parentIdentity.scriptPath
+    MainScriptDir := parentIdentity.scriptDir
+} catch Error as err {
+    WriteWatchdogLog("validation_failed", err.Message, rawMainPID)
+    ExitApp(2)
+}
+
+WriteWatchdogLog("watchdog_started", "identity_validated", MainPID, MainScriptPath)
 
 if (WebhookEnabled && WebhookLink != "" && WebhookScreenshots = "1") {
     screenshotDelay := Random(25000, 300000)
@@ -66,25 +86,16 @@ Loop {
 
     loopCounter++ 
      
-    if (MainPID != "" && !ProcessExist(MainPID)) {
+    if (!ParentProcessIsAlive()) {
+        WriteWatchdogLog("parent_missing", "parent_process_exited", MainPID, MainScriptPath)
         ExitApp()
-    }
-
-    if (Mod(loopCounter, 15) == 0) {
-        DetectHiddenWindows(True) 
-
-        if !WinExist("Main.ahk ahk_class AutoHotkey") {
-            ExitApp()
-        }
-
-        DetectHiddenWindows(false) 
     }
 
     if WinExist("Roblox Crash") {
         if (WebhookEnabled && WebhookLink != "") {
             SendScreenshot(,"Roblox has crashed!")
         }
-        RestartMain()
+        RestartMain("roblox_crash")
         return
     }
 
@@ -92,7 +103,7 @@ Loop {
         if (WebhookEnabled && WebhookLink != "") {
             SendScreenshot(,"Roblox is not running!")
         }
-        RestartMain()
+        RestartMain("roblox_missing")
         return
     }
 
@@ -108,14 +119,14 @@ Loop {
                 if (WebhookEnabled && WebhookLink != "") {
                     SendScreenshot(, "Disconnected, rejoining")
                 }
-                RestartMain()
+                RestartMain("roblox_disconnect_primary")
                 ExitApp()
             } else if ImageSearch(&FoundX, &FoundY, 0, 0, sw, sh, "*26 Resources/disconnected2.png") {
                 CoordMode("Pixel", "Client")
                 if (WebhookEnabled && WebhookLink != "") {
                     SendScreenshot(, "Disconnected, rejoining")
                 }
-                RestartMain()
+                RestartMain("roblox_disconnect_secondary")
                 ExitApp()
             }
         } catch Error as err {
@@ -131,11 +142,11 @@ Loop {
         
         if (resTriumph1.status == "success" && resTriumph1.score > 0.7) {
             if (WebhookEnabled && WebhookLink != "") {
-                CloseMain()
+                CloseMain("match_triumph")
                 Sleep 1300
                 SendInfo("Triumph")
             }
-            RestartMain()
+            RestartMain("match_triumph")
             ExitApp()
         }
     } else {
@@ -145,21 +156,21 @@ Loop {
 
         if (resTriumph2.status == "success" && resTriumph2.score > 0.7) {
             if (WebhookEnabled && WebhookLink != "") {
-                CloseMain()
+                CloseMain("match_triumph")
                 Sleep 1300
                 SendInfo("Triumph")
             }
-            RestartMain()
+            RestartMain("match_triumph")
             ExitApp()
         }
         
         if (resLost.status == "success" && resLost.score > 0.7) {
             if (WebhookEnabled && WebhookLink != "") {
-                CloseMain()
+                CloseMain("match_loss")
                 Sleep 1300
                 SendInfo("Loss")
             }
-            RestartMain()
+            RestartMain("match_loss")
             ExitApp()
         }
     }
@@ -582,42 +593,195 @@ CreateFormData(&retData, &contentType, fields) {
     contentType := "multipart/form-data; boundary=----------------------------" boundary
 }
 
-CloseMain() {
-    global MainPID, SettingsFile
-    
-    try ProcessClose(MainPID)
+CanonicalWatchdogPath(path) {
+    path := Trim(path)
+    if (path = "" || InStr(path, '"'))
+        return ""
 
-    wmi := ComObjGet("winmgmts:")
-    query := "SELECT * FROM Win32_Process WHERE Name = 'AutoHotkey.exe' OR Name = 'AutoHotkeyU64.exe' OR Name = 'AutoHotkeyU32.exe' OR Name = 'AutoHotkey64.exe' OR Name = 'AutoHotkey32.exe'"
-    for process in wmi.ExecQuery(query) {
-        cmd := process.CommandLine
-        if (InStr(cmd, "Main.ahk")) {
-            try ProcessClose(process.ProcessId)
+    requiredChars := DllCall("Kernel32\GetFullPathNameW", "Str", path, "UInt", 0, "Ptr", 0, "Ptr", 0, "UInt")
+    if (!requiredChars)
+        return ""
+
+    pathBuffer := Buffer(requiredChars * 2, 0)
+    writtenChars := DllCall("Kernel32\GetFullPathNameW", "Str", path, "UInt", requiredChars, "Ptr", pathBuffer.Ptr, "Ptr", 0, "UInt")
+    if (!writtenChars || writtenChars >= requiredChars)
+        return ""
+
+    return StrGet(pathBuffer.Ptr, writtenChars, "UTF-16")
+}
+
+WatchdogPathsEqual(leftPath, rightPath) {
+    return (leftPath != "" && rightPath != "" && StrLower(leftPath) = StrLower(rightPath))
+}
+
+WindowsCommandLineArgs(commandLine) {
+    args := []
+    argCount := 0
+    argv := DllCall("Shell32\CommandLineToArgvW", "Str", commandLine, "IntP", &argCount, "Ptr")
+    if (!argv)
+        return args
+
+    try {
+        Loop argCount {
+            argPtr := NumGet(argv, (A_Index - 1) * A_PtrSize, "Ptr")
+            args.Push(StrGet(argPtr, "UTF-16"))
         }
+    } finally {
+        DllCall("Kernel32\LocalFree", "Ptr", argv, "Ptr")
+    }
+
+    return args
+}
+
+ProcessCommandLineHasScript(processID, expectedScriptPath) {
+    try {
+        wmi := ComObjGet("winmgmts:")
+        query := "SELECT ProcessId, CommandLine FROM Win32_Process WHERE ProcessId = " processID
+        for process in wmi.ExecQuery(query) {
+            commandLine := String(process.CommandLine)
+            if (commandLine = "")
+                return false
+
+            for argument in WindowsCommandLineArgs(commandLine) {
+                candidatePath := CanonicalWatchdogPath(argument)
+                if (WatchdogPathsEqual(candidatePath, expectedScriptPath))
+                    return true
+            }
+            return false
+        }
+    } catch Error {
+        return false
+    }
+
+    return false
+}
+
+ValidateWatchdogParent(rawPID, rawScriptPath) {
+    if (!RegExMatch(rawPID, "^[1-9]\d{0,9}$"))
+        throw Error("invalid_parent_pid")
+
+    parentPID := Integer(rawPID)
+    if (parentPID > 0xFFFFFFFF)
+        throw Error("parent_pid_out_of_range")
+    if (ProcessExist(parentPID) != parentPID)
+        throw Error("parent_process_not_running")
+
+    parentScriptPath := CanonicalWatchdogPath(rawScriptPath)
+    if (parentScriptPath = "")
+        throw Error("invalid_parent_script_path")
+
+    attributes := FileExist(parentScriptPath)
+    if (!attributes || InStr(attributes, "D"))
+        throw Error("parent_script_not_found")
+
+    SplitPath(parentScriptPath, , &parentScriptDir, &parentExtension)
+    if (StrLower(parentExtension) != "ahk")
+        throw Error("parent_script_must_be_ahk")
+
+    parentScriptDir := CanonicalWatchdogPath(parentScriptDir)
+    macroRoot := CanonicalWatchdogPath(A_WorkingDir)
+    if (!WatchdogPathsEqual(parentScriptDir, macroRoot))
+        throw Error("parent_script_outside_macro_root")
+    if (!ProcessCommandLineHasScript(parentPID, parentScriptPath))
+        throw Error("parent_pid_script_mismatch")
+
+    return {pid: parentPID, scriptPath: parentScriptPath, scriptDir: parentScriptDir}
+}
+
+WatchdogLogValue(value) {
+    value := String(value)
+    value := StrReplace(value, "`r", " ")
+    value := StrReplace(value, "`n", " ")
+    return StrReplace(value, "`t", " ")
+}
+
+WriteWatchdogLog(eventName, reason := "", parentPID := "", parentScript := "", relaunchedPID := "") {
+    global WatchdogLogDir, WatchdogLogFile
+
+    try {
+        if (!DirExist(WatchdogLogDir))
+            DirCreate(WatchdogLogDir)
+
+        line := "timestamp=" A_NowUTC
+        line .= "`tevent=" WatchdogLogValue(eventName)
+        line .= "`treason=" WatchdogLogValue(reason)
+        line .= "`tparent_pid=" WatchdogLogValue(parentPID)
+        line .= "`tparent_script=" WatchdogLogValue(parentScript)
+        line .= "`trelaunched_pid=" WatchdogLogValue(relaunchedPID)
+        FileAppend(line "`n", WatchdogLogFile, "UTF-8")
+    } catch Error {
     }
 }
 
-RestartMain() {
-    global MainPID, SettingsFile
+ParentProcessIsAlive() {
+    global MainPID
+    return (MainPID > 0 && ProcessExist(MainPID) = MainPID)
+}
 
-    try ProcessClose(MainPID)
+ParentProcessMatchesIdentity() {
+    global MainPID, MainScriptPath
+    return (ParentProcessIsAlive() && ProcessCommandLineHasScript(MainPID, MainScriptPath))
+}
 
-    wmi := ComObjGet("winmgmts:")
-    query := "SELECT * FROM Win32_Process WHERE Name = 'AutoHotkey.exe' OR Name = 'AutoHotkeyU64.exe' OR Name = 'AutoHotkeyU32.exe' OR Name = 'AutoHotkey64.exe' OR Name = 'AutoHotkey32.exe'"
-    for process in wmi.ExecQuery(query) {
-        cmd := process.CommandLine
-        if (InStr(cmd, "Main.ahk")) {
-            try ProcessClose(process.ProcessId)
-        }
+CloseValidatedParent(reason) {
+    global MainPID, MainScriptPath, ParentClosedByWatchdog
+
+    if (!ParentProcessMatchesIdentity()) {
+        WriteWatchdogLog("restart_aborted", "parent_identity_mismatch", MainPID, MainScriptPath)
+        return false
     }
-    WebhookLink := IniRead(SettingsFile, "Webhook", "Link", "")
-    tempWebhook := IniRead(SettingsFile, "Webhook", "Enabled", "OFF")
-    WebhookEnabled := (tempWebhook = "1") ? true : false
 
-    if (A_PtrSize == 4) {
-    Run('"' A_WorkingDir '\submacros\AutoHotkey32.exe" "' A_WorkingDir '\Main.ahk"')
-    } else {
-        Run('"' A_WorkingDir '\submacros\AutoHotkey64.exe" "' A_WorkingDir '\Main.ahk"')
+    try {
+        closedPID := ProcessClose(MainPID)
+        if (closedPID != MainPID) {
+            WriteWatchdogLog("restart_aborted", "parent_close_not_confirmed", MainPID, MainScriptPath)
+            return false
+        }
+
+        stillRunningPID := ProcessWaitClose(MainPID, 5)
+        if (stillRunningPID != 0) {
+            WriteWatchdogLog("restart_aborted", "parent_still_running", MainPID, MainScriptPath)
+            return false
+        }
+    } catch Error {
+        WriteWatchdogLog("restart_aborted", "parent_close_failed", MainPID, MainScriptPath)
+        return false
+    }
+
+    if (ProcessExist(MainPID)) {
+        WriteWatchdogLog("restart_aborted", "parent_still_running", MainPID, MainScriptPath)
+        return false
+    }
+
+    ParentClosedByWatchdog := true
+    WriteWatchdogLog("parent_closed", reason, MainPID, MainScriptPath)
+    return true
+}
+
+CloseMain(reason := "match_result") {
+    return CloseValidatedParent(reason)
+}
+
+RestartMain(reason := "unspecified") {
+    global MainPID, MainScriptPath, MainScriptDir, ParentClosedByWatchdog
+
+    WriteWatchdogLog("restart_requested", reason, MainPID, MainScriptPath)
+
+    if (!ParentClosedByWatchdog && !CloseValidatedParent(reason)) {
+        ExitApp()
+    }
+
+    scriptAttributes := FileExist(MainScriptPath)
+    if (!scriptAttributes || InStr(scriptAttributes, "D") || !WatchdogPathsEqual(CanonicalWatchdogPath(MainScriptPath), MainScriptPath)) {
+        WriteWatchdogLog("restart_aborted", "parent_script_no_longer_valid", MainPID, MainScriptPath)
+        ExitApp()
+    }
+
+    try {
+        Run('"' A_AhkPath '" "' MainScriptPath '"', MainScriptDir, , &relaunchedPID)
+        WriteWatchdogLog("parent_relaunched", reason, MainPID, MainScriptPath, relaunchedPID)
+    } catch Error {
+        WriteWatchdogLog("relaunch_failed", reason, MainPID, MainScriptPath)
     }
 
     ExitApp()

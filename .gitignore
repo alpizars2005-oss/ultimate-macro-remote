@@ -26,13 +26,26 @@ logs/
 log/
 *.log
 *.log.*
-runtime/
+/runtime/
 remote_command.ini
 state.ini
 Settings.tds
 *.pid
 *.tmp
 *.temp
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-journal
+*.sqlite3
+*.sqlite3-journal
+*.lock
+
+# Local development Remote client bridge files
+/UltimateRemoteAgent.exe
+/remote_service.url
 
 # Generated build and editor artifacts
 bin/
