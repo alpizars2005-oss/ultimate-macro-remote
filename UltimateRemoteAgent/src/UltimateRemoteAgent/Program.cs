@@ -16,8 +16,7 @@ internal static class Program
             if (args is ["bootstrap", string bootstrapMacroRoot])
             {
                 NativeConsole.Hide();
-                return await RemoteBootstrap.RunAsync(bootstrapMacroRoot, CancellationToken.None)
-                    .ConfigureAwait(false);
+                return await RunBootstrapAsync(bootstrapMacroRoot).ConfigureAwait(false);
             }
 
             bool background = args is ["run-background"];
@@ -65,6 +64,45 @@ internal static class Program
         catch (Exception)
         {
             SafeLog.Error("UNEXPECTED_FAILURE");
+            return 10;
+        }
+    }
+
+    private static async Task<int> RunBootstrapAsync(string macroRoot)
+    {
+        try
+        {
+            return await RemoteBootstrap.RunAsync(macroRoot, CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (AgentRuntimeException exception)
+        {
+            SafeLog.Error(exception.Code);
+            BootstrapErrorDialog.Show(exception.Code);
+            return 2;
+        }
+        catch (EnrollmentException exception)
+        {
+            SafeLog.Error(exception.Code);
+            BootstrapErrorDialog.Show(exception.Code);
+            return 3;
+        }
+        catch (StrategyCatalogException exception)
+        {
+            string code = $"STRATEGY_CATALOG_{exception.Error.ToString().ToUpperInvariant()}";
+            SafeLog.Error(code);
+            BootstrapErrorDialog.Show(code);
+            return 5;
+        }
+        catch (OperationCanceledException)
+        {
+            return 0;
+        }
+        catch (Exception)
+        {
+            const string code = "UNEXPECTED_FAILURE";
+            SafeLog.Error(code);
+            BootstrapErrorDialog.Show(code);
             return 10;
         }
     }
@@ -173,6 +211,28 @@ internal static class Program
         Console.Error.WriteLine("  UltimateRemoteAgent.exe pair <https-origin> <macro-root>  (development fallback)");
         Console.Error.WriteLine("  UltimateRemoteAgent.exe inspect <macro-root>");
         return 1;
+    }
+
+    private static class BootstrapErrorDialog
+    {
+        internal static void Show(string code)
+        {
+            try
+            {
+                _ = MessageBox.Show(
+                    "Remote setup could not complete.\r\n\r\n" +
+                    $"Code: {code}\r\n\r\n" +
+                    "Make sure the Remote server and secure tunnel are running, then open Ultimate Macro and try Connect Discord again.",
+                    "Ultimate Macro Remote",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+            }
+            catch
+            {
+                // The safe error code was already written through SafeLog. A UI failure
+                // must never interfere with normal Ultimate Macro startup.
+            }
+        }
     }
 
     private static class NativeConsole
