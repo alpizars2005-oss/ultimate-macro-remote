@@ -26,6 +26,16 @@ The intended end-user setup is one-time:
 
 After enrollment, users normally control the macro from Discord. They do not need Python, VS Code, a bot token, a Discord user ID, a pairing ticket, an `.env` file, or a backend URL to type manually.
 
+## Existing official Discord bot can be reused
+
+Remote does **not** require a second public Discord bot.
+
+If Ultimate Macro already has an official bot/application, the preferred upstream integration is to reuse that same Discord application, bot identity, token, command tree, and deployment process. The Remote backend/controller can be attached to the existing bot instead of starting a second `RemoteDiscordClient`.
+
+The same Discord application can provide the existing Ultimate Macro bot, the Remote `/macro` commands, and the OAuth `identify` callback. The bot token and OAuth2 Client Secret remain separate server-side secrets.
+
+See [`docs/existing-bot-integration.md`](docs/existing-bot-integration.md) for the detailed integration path, including how to preserve existing commands and avoid competing Gateway clients/command-tree sync.
+
 ## Safety model
 
 Remote is deliberately allowlisted. The Agent does **not** expose arbitrary shell/CMD/PowerShell execution, remote desktop, a general file browser, arbitrary process launch, arbitrary executable paths, or download-and-execute behavior.
@@ -71,7 +81,7 @@ The current milestone intentionally supports one active linked device per Discor
 - `Main_Remote.ahk` — Remote-aware macro entry point and safe-boundary mailbox consumer.
 - `UltimateRemoteAgent/` — C#/.NET Windows Agent, transport, local bridge, enrollment, and tests.
 - `central/` — Discord bot, OAuth onboarding, WebSocket backend, command service, and SQLite store.
-- `docs/` — protocol, architecture, server, Agent, onboarding/fallback, and preview documentation.
+- `docs/` — protocol, architecture, server, Agent, existing-bot integration, onboarding/fallback, and preview documentation.
 - `tools/` — local client staging and zero-config preview packaging scripts.
 - `.env.example` — server-only configuration template. The real `.env` must remain private and untracked.
 
@@ -81,6 +91,7 @@ Start with [`REVIEW_NOTES.md`](REVIEW_NOTES.md), then [`START_HERE.md`](START_HE
 
 The most useful technical references are:
 
+- [`docs/existing-bot-integration.md`](docs/existing-bot-integration.md)
 - [`docs/remote-architecture.md`](docs/remote-architecture.md)
 - [`docs/remote-protocol-v1.md`](docs/remote-protocol-v1.md)
 - [`docs/remote-preview-r5.md`](docs/remote-preview-r5.md)
