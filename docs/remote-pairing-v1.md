@@ -1,23 +1,32 @@
-# Temporary development pairing
+# Legacy development pairing fallback
 
-R2 pairing is an isolated bootstrap mechanism, not a protocol-1 operation and not the
-final Discord OAuth flow. It exists so a simulated Agent can obtain the existing R1
-device bearer without any manual Discord-user or device-ID input.
+This document describes the **temporary `/macro pair` fallback** that remains in the private development branch for diagnostics and compatibility. It is **not** the intended end-user enrollment flow in R5.
+
+Normal users should use **Connect Discord** OAuth onboarding as described in `remote-preview-r5.md` and `remote-server-r5.md`.
+
+## Why this still exists
+
+The pairing path predates browser OAuth onboarding. It remains useful when a developer needs to test the central/Agent credential boundary without involving the OAuth callback flow.
+
+It does not change protocol 1 and it does not grant any additional Agent capability.
 
 ## Issuance
 
-Only the in-process Discord command surface can issue a ticket. `/macro pair` passes
-`interaction.user.id` directly to `PairingService`; the slash command has no owner,
-guild, or device argument. The bot response is ephemeral and disables all allowed
-mentions.
+Only the in-process Discord command surface can issue a ticket. `/macro pair` passes `interaction.user.id` directly to `PairingService`; the slash command has no owner, guild, device, capability, path, or strategy argument.
 
-A ticket has the form `urpair_v1.<base64url>` and contains 32 bytes (256 bits) from the
-operating-system cryptographic random source. It expires after ten minutes by default,
-is single-use, and is shown only once. SQLite stores a domain-separated SHA-256 digest,
-the authoritative Discord owner, and lifecycle timestamps—never the raw ticket. A new
-ticket invalidates an older unconsumed ticket for that owner. Issuance is persistently
-rate-limited per Discord account, and an already-linked owner cannot issue another
-ticket.
+The Discord response is ephemeral and allowed mentions are disabled.
+
+A ticket has the form:
+
+```text
+urpair_v1.<base64url secret>
+```
+
+The secret contains 256 random bits from the operating-system cryptographic random source. Tickets are short-lived, single-use, and shown once. SQLite stores a domain-separated digest plus authoritative owner/lifecycle metadata, never the raw ticket.
+
+A newer live ticket supersedes an older unconsumed ticket for the same owner. Issuance and redemption are rate-limited.
+
+An already-linked Discord owner cannot create a second active linked device through this fallback.
 
 ## Redemption request
 
@@ -27,16 +36,15 @@ Authorization: Pairing urpair_v1.<ticket>
 Content-Length: 0
 ```
 
-The request has no JSON, form, query, cookie, Discord ID, device ID, capability,
-strategy, path, or other identity field. Tokens supplied in a URL, body, or a different
-authorization scheme are rejected without consuming a valid ticket. The server derives
-the source from the direct socket peer and never trusts `X-Forwarded-For` by default.
-When a loopback TLS proxy is used, all clients therefore conservatively share its source
-bucket unless a future explicitly trusted-proxy design replaces this behavior.
+The request intentionally has no JSON body, query identity, Discord ID, device ID, capability list, strategy, or local path.
 
-Every attempt is rate-limited before ticket parsing or lookup, using persistent hashed
-source and global sliding-window buckets. Unknown, malformed, expired, redeemed,
-superseded, and owner-conflicting tickets receive the same non-enumerating response:
+A token placed in a URL/body or sent using the wrong authorization scheme is rejected.
+
+The server derives its rate-limit source from the direct socket peer and does not trust arbitrary forwarded-client headers by default.
+
+## Failure behavior
+
+Malformed, unknown, expired, redeemed, superseded, and owner-conflicting tickets intentionally share a non-enumerating public failure:
 
 ```json
 {
@@ -47,40 +55,74 @@ superseded, and owner-conflicting tickets receive the same non-enumerating respo
 }
 ```
 
-Rate limiting returns HTTP 429 with a bounded `Retry-After`. Pairing responses always
-carry `Cache-Control: no-store` and `Pragma: no-cache`.
+Rate limiting returns HTTP 429 with bounded retry guidance. Pairing responses are non-cacheable.
 
 ## Successful response
 
-Ticket consumption and device creation occur in one SQLite transaction. Concurrent
-redemptions can create only one device credential, and the stored ticket owner becomes
-the device owner without request-side override.
+Ticket consumption and device creation happen atomically in SQLite. The stored ticket owner becomes the device owner without request-side override.
 
 ```json
 {
   "protocol": 1,
-  "device_credential": "urad_v1.<device UUID>.<256-bit secret>",
+  "device_credential": "urad_v1.<device UUID>.<secret>",
   "agent_websocket_path": "/remote/v1/agent"
 }
 ```
 
-The HTTP status is 201. The bearer is returned once; SQLite stores only its SHA-256
-digest. The simulator then uses it in `Authorization: Bearer …` on the unchanged R1
-WebSocket. Pairing tickets are rejected by the WebSocket credential parser, and device
-credentials are rejected by the pairing parser.
+The bearer is returned once. SQLite stores only its digest.
 
-If the HTTP response is lost after the transaction commits, replay remains forbidden
-because the server does not retain plaintext device credentials. An operator must
-explicitly revoke the orphan device before issuing another ticket. R2 intentionally
-adds no public unlink, replacement, or arbitrary-device administration command.
+The Windows Agent stores the resulting enrollment with DPAPI CurrentUser and then uses the device bearer as:
 
-## Transport and logging boundary
+```http
+Authorization: Bearer <device credential>
+```
 
-The pairing endpoint is safe for cross-PC use only through direct trusted TLS or a
-trusted loopback reverse proxy/tunnel. A proxy must preserve `Authorization`, POST, and
-WebSocket Upgrade traffic, and must redact authorization headers and pairing response
-bodies from logs. The ticket necessarily traverses Discord and is shown ephemerally to
-the invoking user before its one-time handoff to the R3 Agent. Bot tokens and backend
-secrets remain central-server-only; the device bearer is returned only to the redeeming
-Agent. The Agent requires a normally trusted HTTPS/WSS origin and offers no
-certificate-bypass or plaintext enrollment mode.
+on `/remote/v1/agent`.
+
+Pairing tickets are not valid Agent WebSocket credentials, and device credentials are not valid pairing tickets.
+
+## Manual Agent use
+
+The fallback is exposed by the Agent only as a development command:
+
+```powershell
+.\UltimateRemoteAgent.exe pair https://remote.example "C:\path\to\Ultimate_Macro_Remote"
+```
+
+The ticket is entered through the Agent's hidden prompt rather than a command-line argument.
+
+After a successful fallback enrollment:
+
+```powershell
+.\UltimateRemoteAgent.exe run
+```
+
+starts the Agent normally.
+
+## Transport boundary
+
+Cross-PC pairing requires a normally trusted HTTPS endpoint. A TLS reverse proxy/tunnel must preserve `Authorization`, POST, and WebSocket Upgrade traffic and should redact authorization headers/credential-bearing response bodies from logs.
+
+The Agent intentionally has no certificate-bypass mode and no cross-machine plaintext enrollment mode.
+
+## Lost-response behavior
+
+If central commits successful redemption but the credential response is lost, the same ticket cannot be replayed because the server does not retain the plaintext device credential.
+
+Operator recovery is to revoke/clean the orphan linked device and issue a new ticket. The fallback deliberately does not add a public arbitrary-device administration command.
+
+## Relationship to R5 OAuth onboarding
+
+OAuth onboarding is preferred because it removes manual pairing-ticket handling from the normal client UX:
+
+```text
+Agent bootstrap
+  -> random setup secret
+  -> browser Discord OAuth identify
+  -> central authoritative Discord identity
+  -> device credential
+  -> DPAPI enrollment
+  -> background Agent
+```
+
+The fallback remains isolated from the command protocol, so removing it later does not require changing HELLO/WELCOME/COMMAND schemas.
