@@ -63,6 +63,11 @@ class RemoteOnboardingTests(unittest.IsolatedAsyncioTestCase):
         await service.authorize_callback(state=state, code="discord-code")
         self.assertEqual(["discord-code"], service.exchanged_codes)
 
+        # Browser success now means the durable device association already exists;
+        # the following Agent poll only receives the one-time credential.
+        devices_after_callback = self.store.list_devices_for_owner(service.owner)
+        self.assertEqual(1, len(devices_after_callback))
+
         ready = await service.poll(setup_secret)
         self.assertIsNotNone(ready)
         assert ready is not None
@@ -89,6 +94,10 @@ class RemoteOnboardingTests(unittest.IsolatedAsyncioTestCase):
         started = await service.begin(setup_secret, peer_source="127.0.0.1")
         state = parse_qs(urlsplit(started.authorization_url).query)["state"][0]
         await service.authorize_callback(state=state, code="discord-code")
+
+        devices = self.store.list_devices_for_owner(service.owner)
+        self.assertEqual(1, len(devices))
+
         ready = await service.poll(setup_secret)
         assert ready is not None
         self.assertIsNotNone(self.store.authenticate(ready.device_credential))
@@ -109,7 +118,6 @@ class RemoteOnboardingTests(unittest.IsolatedAsyncioTestCase):
         started = await service.begin(setup_secret, peer_source="127.0.0.1")
         state = parse_qs(urlsplit(started.authorization_url).query)["state"][0]
         await service.authorize_callback(state=state, code="discord-code")
-        _ = await service.poll(setup_secret)
 
         self.assertEqual((), self.store.list_devices_for_owner("123456789012345678"))
         self.assertEqual(
