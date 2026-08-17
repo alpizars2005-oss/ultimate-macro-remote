@@ -243,7 +243,25 @@ class OnboardingService:
                     "A Remote device is already linked to this Discord account.",
                     http_status=409,
                 )
+
+            # The browser must not report "connected" before a durable device row
+            # exists. Provision immediately after authoritative Discord identity is
+            # verified; keep the bearer only in this in-memory setup session until
+            # the Agent polls and confirms DPAPI persistence. Expiry cleanup revokes
+            # any provisioned-but-unacknowledged device.
+            try:
+                provisioned: ProvisionedDevice = self.store.provision_device(owner)
+            except StoreError as exc:
+                current.error_code = "ONBOARDING_PROVISION_FAILED"
+                raise OnboardingError(
+                    "ONBOARDING_PROVISION_FAILED",
+                    "Remote setup could not provision this device.",
+                    http_status=503,
+                ) from exc
+
             current.owner_discord_user_id = owner
+            current.device_id = provisioned.device.device_id
+            current.device_credential = provisioned.credential
 
     async def poll(self, setup_secret: str) -> OnboardingReady | None:
         self._require_enabled()
@@ -272,29 +290,13 @@ class OnboardingService:
                 )
             if session.owner_discord_user_id is None:
                 return None
-            if session.device_credential is None:
-                # No await occurs between the ownership check and provisioning, so
-                # this central process serializes its own pairing/onboarding decisions.
-                if self.store.list_devices_for_owner(session.owner_discord_user_id):
-                    session.error_code = "DEVICE_ALREADY_LINKED"
-                    raise OnboardingError(
-                        "DEVICE_ALREADY_LINKED",
-                        "A Remote device is already linked to this Discord account.",
-                        http_status=409,
-                    )
-                try:
-                    provisioned: ProvisionedDevice = self.store.provision_device(
-                        session.owner_discord_user_id
-                    )
-                except StoreError as exc:
-                    session.error_code = "ONBOARDING_PROVISION_FAILED"
-                    raise OnboardingError(
-                        "ONBOARDING_PROVISION_FAILED",
-                        "Remote setup could not provision this device.",
-                        http_status=503,
-                    ) from exc
-                session.device_id = provisioned.device.device_id
-                session.device_credential = provisioned.credential
+            if session.device_id is None or session.device_credential is None:
+                session.error_code = "ONBOARDING_PROVISION_FAILED"
+                raise OnboardingError(
+                    "ONBOARDING_PROVISION_FAILED",
+                    "Remote setup could not provision this device.",
+                    http_status=503,
+                )
             return OnboardingReady(session.device_credential)
 
     async def complete(self, setup_secret: str) -> None:
