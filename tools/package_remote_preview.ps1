@@ -11,6 +11,7 @@ $ErrorActionPreference = "Stop"
 $repoRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot ".."))
 $agentPath = [IO.Path]::GetFullPath($AgentExe)
 $outputRoot = [IO.Path]::GetFullPath($OutputDirectory)
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
 if ([string]::IsNullOrWhiteSpace($PublicOrigin)) {
     $envPath = Join-Path $repoRoot ".env"
@@ -83,10 +84,10 @@ try {
     [IO.File]::WriteAllText(
         (Join-Path $staging "remote_service.url"),
         $canonicalOrigin,
-        [Text.UTF8Encoding]::new($false)
+        $utf8NoBom
     )
 
-    @"
+    $readme = @"
 Ultimate Macro Remote — Development Preview
 
 Service origin: $canonicalOrigin
@@ -100,7 +101,12 @@ Service origin: $canonicalOrigin
 Remote is optional. If declined, Ultimate Macro continues normally.
 
 Development note: if a Cloudflare Quick Tunnel URL changes, rebuild this ZIP from the same updated .env origin before using it on another client.
-"@ | Set-Content -LiteralPath (Join-Path $staging "REMOTE_README.txt") -Encoding utf8NoBOM
+"@
+    [IO.File]::WriteAllText(
+        (Join-Path $staging "REMOTE_README.txt"),
+        $readme,
+        $utf8NoBom
+    )
 
     # Packaging must never leak central/server secrets even if the developer has an
     # untracked .env in the repository working tree.
