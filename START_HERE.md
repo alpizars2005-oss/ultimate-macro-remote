@@ -6,7 +6,7 @@ This branch contains the current private Remote development preview for Ultimate
 
 ## What is implemented now
 
-The Discord bot exposes the protocol-1 controls:
+The Remote command surface exposes the protocol-1 controls:
 
 - `/macro status`
 - `/macro strategies`
@@ -18,6 +18,24 @@ Normal enrollment is **Connect Discord** through OAuth2 authorization code + `id
 
 The Windows Agent is self-contained for `win-x64`. It stores its enrollment using DPAPI CurrentUser, opens an outbound authenticated WSS connection, reads only the approved local macro state/strategy catalog, and implements the three gameplay mutations through fixed local adapters.
 
+## Existing official bot: reuse it
+
+If Ultimate Macro already has an official Discord bot/application, **do not create a second public bot just for Remote**.
+
+Preferred upstream integration:
+
+- keep the existing official bot process and token;
+- use that same Discord application's Application/Client ID and OAuth2 Client Secret for Connect Discord;
+- add the Remote callback URI to that same application;
+- attach Remote `/macro` commands to the existing bot's command tree/cog/extension system using `MacroCommandController`;
+- start the Remote aiohttp/WSS backend with one shared `RemoteService`/`RemoteStore`;
+- keep the official bot's current intents, permissions, sync policy, logging, and unrelated commands;
+- do not run the standalone `RemoteDiscordClient` at the same time with the same production bot token.
+
+The detailed path is [`docs/existing-bot-integration.md`](docs/existing-bot-integration.md).
+
+For isolated testing of this repository before upstream integration, use a separate private test Discord application with `run_bot.bat`.
+
 ## Current architecture
 
 ```text
@@ -26,8 +44,9 @@ Discord account
     | OAuth identify (one-time onboarding)
     | slash commands (ongoing control)
     v
-Central runtime
-  Discord bot + aiohttp backend + RemoteService + SQLite
+Central Remote components
+  existing bot OR standalone preview bot
+  + aiohttp backend + RemoteService + SQLite
     |
     | authenticated WSS /remote/v1/agent
     v
@@ -47,7 +66,9 @@ Main_Remote.ahk
 Roblox / TDS
 ```
 
-## Central development setup
+## Standalone central development setup
+
+This section is for isolated testing of the repository's own Remote Discord client. For integration into the official bot, use `docs/existing-bot-integration.md` instead.
 
 From the repository root on the server/development PC:
 
@@ -71,7 +92,7 @@ From the repository root on the server/development PC:
    .\.venv\Scripts\python.exe -m central.preflight --require-oauth
    ```
 
-7. Start the single central runtime:
+7. Start the single standalone development runtime:
 
    ```powershell
    .\run_bot.bat
@@ -79,7 +100,7 @@ From the repository root on the server/development PC:
 
 8. Verify local health at `/healthz` and the public HTTPS route before enrolling a client.
 
-The backend and Discord bot share the same `RemoteStore` and SQLite database in one process. Do not run a second writer against the same database directory.
+The backend and standalone Discord bot share the same `RemoteStore` and SQLite database in one process. Do not run a second writer against the same database directory.
 
 ## Build the Windows Agent
 
@@ -163,14 +184,16 @@ The pull-request CI additionally publishes the self-contained Agent and smoke-te
 - Cloudflare Quick Tunnel hostnames are development-only and may change; the server `.env`, Discord redirect URI, and packaged client origin must stay in sync.
 - Formal public Terms/Privacy text and production operations are not finished.
 - OAuth setup sessions are process-local. If the central process dies after durable device provisioning but before the Agent completes setup, an offline row can require operator cleanup before retrying. Do not represent this preview as production-ready until onboarding persistence/cleanup is hardened.
+- The standalone Remote Discord client is for isolated preview testing; official integration should preserve the existing bot and command tree.
 - Do not publicly distribute this branch or client package without upstream approval.
 
 ## Recommended reading order
 
 1. [`REVIEW_NOTES.md`](REVIEW_NOTES.md)
-2. [`docs/remote-architecture.md`](docs/remote-architecture.md)
-3. [`docs/remote-protocol-v1.md`](docs/remote-protocol-v1.md)
-4. [`docs/windows-agent-r5.md`](docs/windows-agent-r5.md)
-5. [`docs/remote-server-r5.md`](docs/remote-server-r5.md)
-6. [`docs/remote-preview-r5.md`](docs/remote-preview-r5.md)
-7. [`docs/remote-pairing-v1.md`](docs/remote-pairing-v1.md) only if the legacy fallback is relevant
+2. [`docs/existing-bot-integration.md`](docs/existing-bot-integration.md) — especially for the official Ultimate Macro bot
+3. [`docs/remote-architecture.md`](docs/remote-architecture.md)
+4. [`docs/remote-protocol-v1.md`](docs/remote-protocol-v1.md)
+5. [`docs/windows-agent-r5.md`](docs/windows-agent-r5.md)
+6. [`docs/remote-server-r5.md`](docs/remote-server-r5.md)
+7. [`docs/remote-preview-r5.md`](docs/remote-preview-r5.md)
+8. [`docs/remote-pairing-v1.md`](docs/remote-pairing-v1.md) only if the legacy fallback is relevant
