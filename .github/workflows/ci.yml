@@ -1,0 +1,54 @@
+name: Remote layer checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  python-remote:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install remote-layer dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Verify dependency health
+        run: python -m pip check
+
+      - name: Compile Discord remote bridge
+        run: python -m py_compile bot.py
+
+      - name: Validate example configuration
+        shell: pwsh
+        run: |
+          $required = @('DISCORD_TOKEN=', 'ALLOWED_USER_ID=', 'GUILD_ID=', 'MAIN_AHK=')
+          $text = Get-Content .env.example -Raw
+          foreach ($item in $required) {
+            if (-not $text.Contains($item)) { throw "Missing example setting: $item" }
+          }
+          if ($text -match '(?m)^DISCORD_TOKEN\s*=\s*$') {
+            throw 'DISCORD_TOKEN example must contain an obvious placeholder, not an empty value.'
+          }
+
+      - name: Confirm stock fallback remains present
+        shell: pwsh
+        run: |
+          if (-not (Test-Path Main.ahk)) { throw 'Stock Main.ahk fallback is missing.' }
+          if (-not (Test-Path Main_Remote.ahk)) { throw 'Remote Main_Remote.ahk is missing.' }
