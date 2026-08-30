@@ -35,6 +35,16 @@ jobs:
       - name: Compile Discord remote bridge
         run: python -m py_compile bot.py
 
+      - name: Validate zero-touch updater contracts
+        run: python tests/test_updater_contract.py
+
+      - name: Parse PowerShell updater
+        shell: pwsh
+        run: |
+          $source = Get-Content submacros/update.ps1 -Raw
+          $null = [ScriptBlock]::Create($source)
+          Write-Host 'PowerShell updater syntax OK'
+
       - name: Validate example configuration
         shell: pwsh
         run: |
