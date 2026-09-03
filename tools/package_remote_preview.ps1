@@ -92,8 +92,10 @@ try {
         $utf8NoBom
     )
 
+    # Keep this generated here-string ASCII-only because Windows PowerShell 5.1 can
+    # interpret UTF-8 script files without a BOM using the active ANSI code page.
     $readme = @"
-Ultimate Macro Remote — Macro-first Link Code Preview
+Ultimate Macro Remote - Macro-first Link Code Preview
 
 Service origin: $canonicalOrigin
 
