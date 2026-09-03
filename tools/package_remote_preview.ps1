@@ -57,6 +57,7 @@ $requiredDirectories = @(
     "lib",
     "submacros"
 )
+$botContractPath = Join-Path $repoRoot "docs\discord-link-code-contract.md"
 foreach ($relative in $requiredFiles) {
     if (-not (Test-Path -LiteralPath (Join-Path $repoRoot $relative) -PathType Leaf)) {
         throw "Required client file is missing: $relative"
@@ -66,6 +67,9 @@ foreach ($relative in $requiredDirectories) {
     if (-not (Test-Path -LiteralPath (Join-Path $repoRoot $relative) -PathType Container)) {
         throw "Required client directory is missing: $relative"
     }
+}
+if (-not (Test-Path -LiteralPath $botContractPath -PathType Leaf)) {
+    throw "Required bot linking contract is missing: docs\discord-link-code-contract.md"
 }
 
 $stagingParent = Join-Path ([IO.Path]::GetTempPath()) ("UltimateMacroRemote." + [Guid]::NewGuid().ToString("N"))
@@ -80,6 +84,7 @@ try {
     }
 
     Copy-Item -LiteralPath $agentPath -Destination (Join-Path $staging "UltimateRemoteAgent.exe")
+    Copy-Item -LiteralPath $botContractPath -Destination (Join-Path $staging "REMOTE_BOT_LINKING.md")
     $canonicalOrigin = $origin.GetLeftPart([UriPartial]::Authority)
     [IO.File]::WriteAllText(
         (Join-Path $staging "remote_service.url"),
@@ -88,19 +93,31 @@ try {
     )
 
     $readme = @"
-Ultimate Macro Remote — Development Preview
+Ultimate Macro Remote — Macro-first Link Code Preview
 
 Service origin: $canonicalOrigin
 
+USER FLOW
 1. Extract this ZIP to a normal local folder.
 2. Run Main_Remote.ahk normally.
-3. On first run only, review the Remote Terms/Privacy notice and choose Connect Discord.
-4. Authorize Discord in the browser. No Discord ID, ticket, Python, .env, bot token, or terminal is required on the client PC.
-5. If Start with Windows is enabled, only the Remote Agent waits in the background. It does not start Roblox or a strategy by itself.
+3. On first run, review the Remote Terms/Privacy notice and choose Generate Link Code.
+4. Ultimate Macro shows a top-most code such as ULT-7KQ3M-P9R2X and the exact command:
+
+   /macro link ULT-7KQ3M-P9R2X
+
+5. Run that command in the official Ultimate Macro Discord server.
+6. The popup closes automatically after the bot claims the code and the Agent stores its DPAPI-protected enrollment.
+7. If Start with Windows is enabled, only the Remote Agent waits in the background. It does not start Roblox or a strategy by itself.
+
+There is no website/browser step in the default link flow. The client never needs a Discord user ID, bot token, OAuth client secret, Python, .env, or terminal.
+
+BOT DEVELOPER
+See REMOTE_BOT_LINKING.md in this ZIP for the exact code formula, claim contract, error mapping, and trust-boundary requirements for the official bot.
 
 Remote is optional. If declined, Ultimate Macro continues normally.
 
-Development note: if a Cloudflare Quick Tunnel URL changes, rebuild this ZIP from the same updated .env origin before using it on another client.
+COMPATIBILITY NOTE
+This ZIP is a private Remote integration preview. The link-code contract is the bot handoff. Do not label the entire AutoHotkey Remote runtime as an official 1.3.4 build until its separate upstream runtime rebase is verified.
 "@
     [IO.File]::WriteAllText(
         (Join-Path $staging "REMOTE_README.txt"),
@@ -125,7 +142,7 @@ Development note: if a Cloudflare Quick Tunnel URL changes, rebuild this ZIP fro
     }
 
     New-Item -ItemType Directory -Path $outputRoot -Force | Out-Null
-    $zipPath = Join-Path $outputRoot "Ultimate_Macro_Remote_Preview.zip"
+    $zipPath = Join-Path $outputRoot "Ultimate_Macro_Remote_LinkCode_Preview.zip"
     if (Test-Path -LiteralPath $zipPath) {
         Remove-Item -LiteralPath $zipPath -Force
     }

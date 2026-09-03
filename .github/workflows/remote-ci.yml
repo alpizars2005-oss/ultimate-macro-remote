@@ -3,6 +3,8 @@ name: Ultimate Remote CI
 on:
   pull_request:
     branches: [main]
+  push:
+    branches: [feature/ultimate-remote-agent]
 
 permissions:
   contents: read
@@ -18,6 +20,8 @@ jobs:
           cache: pip
       - name: Install central dependencies
         run: python -m pip install -r requirements.txt
+      - name: Compile central modules
+        run: python -m compileall -q central tests
       - name: Run central tests
         run: python -B -m unittest discover -s tests -v
 
@@ -56,24 +60,42 @@ jobs:
           Remove-Item -LiteralPath .\.env -Force
           Remove-Item -LiteralPath .\UltimateRemoteAgent.exe -Force
           Remove-Item -LiteralPath .\remote_service.url -Force
-          if (-not (Test-Path .\ci-package\Ultimate_Macro_Remote_Preview.zip)) { throw "Client package was not produced." }
+          $zipPath = '.\ci-package\Ultimate_Macro_Remote_LinkCode_Preview.zip'
+          if (-not (Test-Path $zipPath)) { throw "Client package was not produced." }
           Add-Type -AssemblyName System.IO.Compression.FileSystem
-          $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path .\ci-package\Ultimate_Macro_Remote_Preview.zip))
+          $zip = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $zipPath))
           try {
             # Windows PowerShell 5.1 Compress-Archive may preserve directory separators
             # as backslashes in ZipArchiveEntry.FullName. Normalize only for comparison.
-            $entry = $zip.Entries | Where-Object { (($_.FullName -replace '\\','/')) -eq "Ultimate_Macro_Remote/remote_service.url" }
-            if ($null -eq $entry) { throw "remote_service.url is missing from client package." }
-            $reader = New-Object IO.StreamReader($entry.Open())
+            $entries = @{}
+            foreach ($candidate in $zip.Entries) {
+              $entries[(($candidate.FullName -replace '\\','/'))] = $candidate
+            }
+            $originEntry = $entries['Ultimate_Macro_Remote/remote_service.url']
+            if ($null -eq $originEntry) { throw "remote_service.url is missing from client package." }
+            $reader = New-Object IO.StreamReader($originEntry.Open())
             try { $embedded = $reader.ReadToEnd().Trim() } finally { $reader.Dispose() }
-            if ($embedded -ne "https://remote.example") { throw "Client package origin did not match central .env origin." }
+            if ($embedded -ne 'https://remote.example') { throw "Client package origin did not match central .env origin." }
+
+            $readmeEntry = $entries['Ultimate_Macro_Remote/REMOTE_README.txt']
+            if ($null -eq $readmeEntry) { throw "REMOTE_README.txt is missing from client package." }
+            $reader = New-Object IO.StreamReader($readmeEntry.Open())
+            try { $readme = $reader.ReadToEnd() } finally { $reader.Dispose() }
+            if ($readme -notmatch '/macro link') { throw "Package instructions do not describe the link-code command." }
+            if ($readme -match 'Authorize Discord in the browser') { throw "Legacy browser onboarding leaked into package instructions." }
+
+            $contractEntry = $entries['Ultimate_Macro_Remote/REMOTE_BOT_LINKING.md']
+            if ($null -eq $contractEntry) { throw "Bot linking contract is missing from client package." }
+            $reader = New-Object IO.StreamReader($contractEntry.Open())
+            try { $contract = $reader.ReadToEnd() } finally { $reader.Dispose() }
+            if ($contract -notmatch 'ULT-XXXXX-XXXXX') { throw "Bot linking contract is missing the canonical code formula." }
           } finally {
             $zip.Dispose()
           }
-      - name: Upload zero-config client package
+      - name: Upload link-code client package
         uses: actions/upload-artifact@v4
         with:
-          name: ultimate-macro-remote-preview
-          path: .\ci-package\Ultimate_Macro_Remote_Preview.zip
+          name: ultimate-macro-remote-link-code-preview
+          path: .\ci-package\Ultimate_Macro_Remote_LinkCode_Preview.zip
           if-no-files-found: error
           retention-days: 7
