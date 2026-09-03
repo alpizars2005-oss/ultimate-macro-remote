@@ -13,7 +13,7 @@ internal sealed record RemotePreferences(
     DateTimeOffset AcceptedAtUtc)
 {
     internal const int CurrentVersion = 1;
-    internal const string CurrentTermsVersion = "preview-2026-08-15";
+    internal const string CurrentTermsVersion = "preview-2026-09-02-link-code";
 }
 
 internal sealed class RemotePreferencesStore
@@ -148,6 +148,8 @@ internal static class RemoteConsentDialog
         "The Agent does not provide arbitrary remote desktop access, a shell, PowerShell/CMD execution, " +
         "or general access to personal files. Safe stop/switch requests wait for Ultimate Macro's validated " +
         "between-match boundary. The Agent starting with Windows does not start Roblox or a strategy by itself.\r\n\r\n" +
+        "Discord linking uses a short one-time code shown by Ultimate Macro and entered into the official bot. " +
+        "The macro does not ask for your Discord user ID or bot token, and normal linking does not require a website.\r\n\r\n" +
         "This development preview uses provisional Terms and Privacy text until the project owner publishes " +
         "formal policies. You can decline Remote and continue using Ultimate Macro normally.";
 
@@ -160,7 +162,7 @@ internal static class RemoteConsentDialog
         {
             Text = "Ultimate Macro Remote",
             Width = 620,
-            Height = 560,
+            Height = 590,
             StartPosition = FormStartPosition.CenterScreen,
             MinimizeBox = false,
             MaximizeBox = false,
@@ -184,7 +186,7 @@ internal static class RemoteConsentDialog
             Left = 24,
             Top = 62,
             Width = 552,
-            Height = 300,
+            Height = 325,
             TabStop = false,
         };
         var agree = new CheckBox
@@ -192,7 +194,7 @@ internal static class RemoteConsentDialog
             Text = "I agree to the Remote Terms and Privacy Notice above.",
             AutoSize = true,
             Left = 24,
-            Top = 380,
+            Top = 405,
         };
         var startup = new CheckBox
         {
@@ -200,16 +202,16 @@ internal static class RemoteConsentDialog
             AutoSize = true,
             Checked = true,
             Left = 24,
-            Top = 412,
+            Top = 437,
         };
         var connect = new Button
         {
-            Text = "Connect Discord",
+            Text = "Generate Link Code",
             Enabled = false,
-            Width = 160,
+            Width = 170,
             Height = 38,
-            Left = 416,
-            Top = 458,
+            Left = 406,
+            Top = 488,
             DialogResult = DialogResult.OK,
         };
         var decline = new Button
@@ -217,8 +219,8 @@ internal static class RemoteConsentDialog
             Text = "Not now",
             Width = 110,
             Height = 38,
-            Left = 294,
-            Top = 458,
+            Left = 284,
+            Top = 488,
             DialogResult = DialogResult.Cancel,
         };
         agree.CheckedChanged += (_, _) => connect.Enabled = agree.Checked;
@@ -352,7 +354,7 @@ internal static class RemoteBootstrap
         EnrollmentRecord? enrollment = TryLoadEnrollment(enrollmentStore);
         if (enrollment is null)
         {
-            enrollment = await EnrollWithDiscordAsync(
+            enrollment = await EnrollWithLinkCodeAsync(
                 origin,
                 macroRoot,
                 enrollmentStore,
@@ -373,7 +375,7 @@ internal static class RemoteBootstrap
         {
             // A different service origin is a different trust boundary. Never copy an
             // existing bearer across origins; require a fresh authoritative enrollment.
-            enrollment = await EnrollWithDiscordAsync(
+            enrollment = await EnrollWithLinkCodeAsync(
                 origin,
                 macroRoot,
                 enrollmentStore,
@@ -398,6 +400,80 @@ internal static class RemoteBootstrap
         }
     }
 
+    private static async Task<EnrollmentRecord> EnrollWithLinkCodeAsync(
+        Uri origin,
+        string macroRoot,
+        DpapiEnrollmentStore store,
+        CancellationToken cancellationToken)
+    {
+        string setupSecret = LinkingClient.CreateSetupSecret();
+        try
+        {
+            using var client = new LinkingClient();
+            LinkingStart start = await client.BeginAsync(
+                origin,
+                setupSecret,
+                cancellationToken).ConfigureAwait(false);
+
+            LinkingReady ready = RemoteLinkCodeDialog.WaitForLink(
+                start.Code,
+                start.ExpiresAt,
+                token => client.PollAsync(origin, setupSecret, token),
+                cancellationToken);
+
+            var enrollment = new EnrollmentRecord(
+                EnrollmentRecord.CurrentVersion,
+                origin,
+                ready.WebSocketUri,
+                macroRoot,
+                ready.DeviceCredential);
+            store.Save(enrollment);
+
+            await CompleteLinkWithRetryAsync(
+                client,
+                origin,
+                setupSecret,
+                start.ExpiresAt,
+                cancellationToken).ConfigureAwait(false);
+            return enrollment;
+        }
+        catch (LinkingClientException exception)
+        {
+            throw new AgentRuntimeException(exception.Code, exception);
+        }
+        finally
+        {
+            setupSecret = string.Empty;
+        }
+    }
+
+    private static async Task CompleteLinkWithRetryAsync(
+        LinkingClient client,
+        Uri origin,
+        string setupSecret,
+        DateTimeOffset expiresAt,
+        CancellationToken cancellationToken)
+    {
+        while (DateTimeOffset.UtcNow < expiresAt)
+        {
+            try
+            {
+                await client.CompleteAsync(origin, setupSecret, cancellationToken)
+                    .ConfigureAwait(false);
+                return;
+            }
+            catch (LinkingClientException exception) when (
+                exception.Code is "LINK_REJECTED" or "LINK_NETWORK_FAILED")
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+        throw new AgentRuntimeException("LINK_CONFIRMATION_FAILED");
+    }
+
+    // Legacy OAuth onboarding remains in-tree as a rollback/reference path. The
+    // packaged default above is intentionally macro-first linking-code onboarding.
     private static async Task<EnrollmentRecord> EnrollWithDiscordAsync(
         Uri origin,
         string macroRoot,
