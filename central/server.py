@@ -8,6 +8,7 @@ import ssl
 from aiohttp import WSMsgType, web
 
 from .config import RemoteConfig
+from .linking import LinkingError, LinkingService
 from .onboarding import OnboardingError, OnboardingService
 from .pairing import PairingError, PairingService
 from .protocol import (
@@ -36,6 +37,7 @@ CONFIG_KEY = web.AppKey("remote_config", RemoteConfig)
 SERVICE_KEY = web.AppKey("remote_service", RemoteService)
 STORE_KEY = web.AppKey("remote_store", RemoteStore)
 PAIRING_KEY = web.AppKey("pairing_service", PairingService)
+LINKING_KEY = web.AppKey("linking_service", LinkingService)
 ONBOARDING_KEY = web.AppKey("onboarding_service", OnboardingService)
 
 
@@ -45,6 +47,7 @@ def create_app(
     store: RemoteStore | None = None,
     service: RemoteService | None = None,
     pairing_service: PairingService | None = None,
+    linking_service: LinkingService | None = None,
     onboarding_service: OnboardingService | None = None,
 ) -> web.Application:
     config.validate()
@@ -61,18 +64,25 @@ def create_app(
         )
     if pairing_service is not None and pairing_service.store is not remote_store:
         raise ValueError("Injected PairingService and RemoteStore must match.")
+    if linking_service is not None and linking_service.store is not remote_store:
+        raise ValueError("Injected LinkingService and RemoteStore must match.")
     if onboarding_service is not None and onboarding_service.store is not remote_store:
         raise ValueError("Injected OnboardingService and RemoteStore must match.")
     pairing = pairing_service or PairingService(remote_store)
+    linking = linking_service or LinkingService(remote_store)
     app = web.Application(client_max_size=MAX_MESSAGE_BYTES)
     app[CONFIG_KEY] = config
     app[STORE_KEY] = remote_store
     app[SERVICE_KEY] = remote_service
     app[PAIRING_KEY] = pairing
+    app[LINKING_KEY] = linking
     if onboarding_service is not None:
         app[ONBOARDING_KEY] = onboarding_service
     app.router.add_get("/healthz", _health)
     app.router.add_post("/remote/v1/pair", _redeem_pairing_ticket)
+    app.router.add_post("/remote/v1/link/begin", _link_begin)
+    app.router.add_post("/remote/v1/link/status", _link_status)
+    app.router.add_post("/remote/v1/link/complete", _link_complete)
     if onboarding_service is not None:
         app.router.add_post("/remote/v1/onboarding/begin", _onboarding_begin)
         app.router.add_post("/remote/v1/onboarding/status", _onboarding_status)
@@ -131,6 +141,127 @@ async def _redeem_pairing_ticket(request: web.Request) -> web.Response:
         status=201,
         headers=_no_store_headers(),
     )
+
+
+async def _link_begin(request: web.Request) -> web.Response:
+    if request.can_read_body or request.query_string:
+        return _link_error_response(
+            LinkingError(
+                "LINK_REQUEST_INVALID",
+                "Remote linking request was invalid.",
+                http_status=400,
+            ),
+            force_close=request.can_read_body,
+        )
+    secret = _linking_credential(request)
+    if secret is None:
+        return _link_unauthorized()
+    try:
+        started = await request.app[LINKING_KEY].begin(
+            secret,
+            peer_source=_peer_source(request),
+        )
+    except LinkingError as exc:
+        return _link_error_response(exc)
+    return web.json_response(
+        {
+            "protocol": PROTOCOL_VERSION,
+            "link_code": started.code,
+            "expires_at": started.expires_at,
+        },
+        status=201,
+        headers=_no_store_headers(),
+    )
+
+
+async def _link_status(request: web.Request) -> web.Response:
+    if request.can_read_body or request.query_string:
+        return _link_error_response(
+            LinkingError(
+                "LINK_REQUEST_INVALID",
+                "Remote linking request was invalid.",
+                http_status=400,
+            ),
+            force_close=request.can_read_body,
+        )
+    secret = _linking_credential(request)
+    if secret is None:
+        return _link_unauthorized()
+    try:
+        ready = await request.app[LINKING_KEY].poll(secret)
+    except LinkingError as exc:
+        return _link_error_response(exc)
+    if ready is None:
+        return web.json_response(
+            {"protocol": PROTOCOL_VERSION, "status": "pending"},
+            status=202,
+            headers=_no_store_headers(),
+        )
+    return web.json_response(
+        {
+            "protocol": PROTOCOL_VERSION,
+            "status": "ready",
+            "device_credential": ready.device_credential,
+            "agent_websocket_path": "/remote/v1/agent",
+        },
+        status=201,
+        headers=_no_store_headers(),
+    )
+
+
+async def _link_complete(request: web.Request) -> web.Response:
+    if request.can_read_body or request.query_string:
+        return _link_error_response(
+            LinkingError(
+                "LINK_REQUEST_INVALID",
+                "Remote linking request was invalid.",
+                http_status=400,
+            ),
+            force_close=request.can_read_body,
+        )
+    secret = _linking_credential(request)
+    if secret is None:
+        return _link_unauthorized()
+    try:
+        await request.app[LINKING_KEY].complete(secret)
+    except LinkingError as exc:
+        return _link_error_response(exc)
+    return web.Response(status=204, headers=_no_store_headers())
+
+
+def _link_unauthorized() -> web.Response:
+    response = web.json_response(
+        {
+            "error": {
+                "code": "LINK_AUTH_REQUIRED",
+                "message": "Remote linking authentication is required.",
+            }
+        },
+        status=401,
+        headers=_no_store_headers(),
+    )
+    response.headers["WWW-Authenticate"] = "Linking"
+    return response
+
+
+def _link_error_response(
+    exc: LinkingError,
+    *,
+    force_close: bool = False,
+) -> web.Response:
+    headers = _no_store_headers()
+    if exc.retry_after_seconds is not None:
+        headers["Retry-After"] = str(exc.retry_after_seconds)
+    if exc.http_status == 401:
+        headers["WWW-Authenticate"] = "Linking"
+    response = web.json_response(
+        {"error": {"code": exc.code, "message": exc.user_message}},
+        status=exc.http_status,
+        headers=headers,
+    )
+    if force_close:
+        response.force_close()
+    return response
 
 
 async def _onboarding_begin(request: web.Request) -> web.Response:
@@ -387,6 +518,10 @@ def _bearer_credential(request: web.Request) -> str | None:
 
 def _pairing_credential(request: web.Request) -> str | None:
     return _authorization_credential(request, "Pairing", 96)
+
+
+def _linking_credential(request: web.Request) -> str | None:
+    return _authorization_credential(request, "Linking", 96)
 
 
 def _onboarding_credential(request: web.Request) -> str | None:

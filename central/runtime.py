@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 from .config import RemoteConfig
 from .discord_bot import DiscordBotOptions, RemoteDiscordClient
+from .linking import LinkingService
 from .onboarding import OnboardingOptions, OnboardingService
 from .pairing import PairingOptions, PairingService
 from .server import build_ssl_context, create_app
@@ -28,6 +29,7 @@ class RuntimeComponents:
     store: RemoteStore
     service: RemoteService
     pairing: PairingService
+    linking: LinkingService
     onboarding: OnboardingService | None
     app: web.Application
     discord_client: RemoteDiscordClient
@@ -55,6 +57,7 @@ def create_runtime_components(
             command_delivery_ttl_seconds=remote_config.command_delivery_ttl_seconds,
         )
         pairing = PairingService(store, pairing_options)
+        linking = LinkingService(store)
         onboarding = (
             OnboardingService(store, onboarding_options)
             if onboarding_options is not None and onboarding_options.enabled
@@ -65,13 +68,22 @@ def create_runtime_components(
             store=store,
             service=service,
             pairing_service=pairing,
+            linking_service=linking,
             onboarding_service=onboarding,
         )
         client = client_factory(service, pairing, discord_options)
     except Exception:
         store.close()
         raise
-    return RuntimeComponents(store, service, pairing, onboarding, app, client)
+    return RuntimeComponents(
+        store,
+        service,
+        pairing,
+        linking,
+        onboarding,
+        app,
+        client,
+    )
 
 
 async def run_runtime(
@@ -101,15 +113,16 @@ async def run_runtime(
         )
         await site.start()
         LOGGER.info("Central Remote runtime started.")
+        LOGGER.info("Macro-first Discord linking-code service enabled.")
         if onboarding_options is not None and onboarding_options.enabled:
-            LOGGER.info("Discord OAuth onboarding enabled at %s", onboarding_options.redirect_uri)
+            LOGGER.info("Legacy Discord OAuth onboarding enabled at %s", onboarding_options.redirect_uri)
         elif pairing_options.public_https_origin:
             LOGGER.info(
-                "Discord OAuth onboarding disabled; development /macro pair remains available at %s",
+                "Legacy OAuth onboarding disabled; development /macro pair remains available at %s",
                 pairing_options.public_https_origin,
             )
         else:
-            LOGGER.info("Discord OAuth onboarding disabled; development pairing is loopback-only.")
+            LOGGER.info("Legacy OAuth onboarding disabled; development pairing is loopback-only.")
         await components.discord_client.start(
             discord_options.token, reconnect=True
         )
